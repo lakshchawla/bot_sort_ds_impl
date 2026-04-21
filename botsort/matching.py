@@ -50,22 +50,18 @@ def linear_assignment(cost_matrix, thresh):
 
 
 def ious(atlbrs, btlbrs):
-    """
-    Compute cost based on IoU
-    :type atlbrs: list[tlbr] | np.ndarray
-    :type btlbrs: list[tlbr] | np.ndarray
-
-    :rtype ious np.ndarray
-    """
-    ious = np.zeros((len(atlbrs), len(btlbrs)), dtype=np.float)
+    ious = np.zeros((len(atlbrs), len(btlbrs)), dtype=np.float64)
     if ious.size == 0:
         return ious
 
-    ious = bbox_ious(
-        np.ascontiguousarray(atlbrs, dtype=np.float),
-        np.ascontiguousarray(btlbrs, dtype=np.float)
-    )
+    # ← ADD THIS: cython_bbox only accepts float64 buffers
+    atlbrs = [np.asarray(b, dtype=np.float64) for b in atlbrs]
+    btlbrs = [np.asarray(b, dtype=np.float64) for b in btlbrs]
 
+    ious = bbox_ious(
+        np.ascontiguousarray(atlbrs, dtype=np.float64),
+        np.ascontiguousarray(btlbrs, dtype=np.float64)
+    )
     return ious
 
 
@@ -84,23 +80,10 @@ def tlbr_expand(tlbr, scale=1.2):
 
 
 def iou_distance(atracks, btracks):
-    """
-    Compute cost based on IoU
-    :type atracks: list[STrack]
-    :type btracks: list[STrack]
-
-    :rtype cost_matrix np.ndarray
-    """
-
-    if (len(atracks)>0 and isinstance(atracks[0], np.ndarray)) or (len(btracks) > 0 and isinstance(btracks[0], np.ndarray)):
-        atlbrs = atracks
-        btlbrs = btracks
-    else:
-        atlbrs = [track.tlbr for track in atracks]
-        btlbrs = [track.tlbr for track in btracks]
-    _ious = ious(atlbrs, btlbrs)
-    cost_matrix = 1 - _ious
-
+    # ← cast here too, so it's consistent regardless of track dtype
+    atlbrs = [np.asarray(track.tlbr, dtype=np.float64) for track in atracks]
+    btlbrs = [np.asarray(track.tlbr, dtype=np.float64) for track in btracks]
+    cost_matrix = 1 - ious(atlbrs, btlbrs)
     return cost_matrix
 
 
@@ -133,16 +116,16 @@ def embedding_distance(tracks, detections, metric='cosine'):
     :return: cost_matrix np.ndarray
     """
 
-    cost_matrix = np.zeros((len(tracks), len(detections)), dtype=np.float)
+    cost_matrix = np.zeros((len(tracks), len(detections)), dtype=np.float16)
     if cost_matrix.size == 0:
         return cost_matrix
-    det_features = np.asarray([track.curr_feat for track in detections], dtype=np.float)
-    track_features = np.asarray([track.smooth_feat for track in tracks], dtype=np.float)
+    det_features = np.asarray([track.curr_feat for track in detections], dtype=np.float16)
+    track_features = np.asarray([track.smooth_feat for track in tracks], dtype=np.float16)
 
     cost_matrix = np.maximum(0.0, cdist(track_features, det_features, metric))  # / 2.0  # Nomalized features
     return cost_matrix
 
-def centroid_distance(tracks, detections, metric='euclidean'):  # 추가
+def centroid_distance(tracks, detections, metric='euclidean'):
     """
     :param atracks: list[Locations]
     :param btracks: list[Locations]
@@ -150,11 +133,11 @@ def centroid_distance(tracks, detections, metric='euclidean'):  # 추가
     :return: cost_matrix np.ndarray
     """
 
-    cost_matrix = np.zeros((len(tracks), len(detections)), dtype=np.float)
+    cost_matrix = np.zeros((len(tracks), len(detections)), dtype=np.float16)
     if cost_matrix.size == 0:
         return cost_matrix
-    det_centroids = np.asarray([track.centroid for track in detections], dtype=np.float)
-    track_centroids = np.asarray([track.centroid for track in tracks], dtype=np.float)
+    det_centroids = np.asarray([track.centroid for track in detections], dtype=np.float16)
+    track_centroids = np.asarray([track.centroid for track in tracks], dtype=np.float16)
     cost_matrix = cdist(track_centroids, det_centroids, metric)
     return cost_matrix
 

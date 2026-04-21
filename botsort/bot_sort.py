@@ -30,7 +30,7 @@ class STrack(BaseTrack):
     def __init__(self, tlwh, score, feat=None, pose=None, num_kpts=0, img_path=None, feat_history=50):
 
         # wait activate
-        self._tlwh = np.asarray(tlwh, dtype=np.float)
+        self._tlwh = np.asarray(tlwh, dtype=np.float16)
         self.kalman_filter = None
         self.mean, self.covariance = None, None
         self.is_activated = False
@@ -47,7 +47,7 @@ class STrack(BaseTrack):
             self.update_features(feat)
         self.alpha = 0.9
 
-        self.centroid = np.asarray(self._tlwh[:2] + self._tlwh[2:] / 2, dtype=np.float)
+        self.centroid = np.asarray(self._tlwh[:2] + self._tlwh[2:] / 2, dtype=np.float16)
         self.t_global_id = 0
         self.global_id = 0
 
@@ -221,7 +221,7 @@ class STrack(BaseTrack):
 
     @staticmethod
     def tlbr_to_tlwh(tlbr):
-        ret = np.asarray(tlbr).copy()
+        ret = np.asarray(tlbr, dtype=np.float16).copy()
         ret[2:] -= ret[:2]
         return ret
 
@@ -300,35 +300,22 @@ class BoTSORT(object):
         removed_stracks = []
 
         if len(output_results):
-            if self._is_deepstream_app:
-                # fetch these for deepstream pipeline from the probe 
-                ds_local_id = np.array([d['local_track_id'] for d in output_results])
-                scores = np.array([d['det_confidence'] for d in output_results])
-                bboxes = np.array([d['bbox'] for d in output_results])
-                classes = np.array([1 for d in output_results])
-                features = np.array([d['reid_vector'] for d in output_results])
 
-            elif output_results.shape[1] == 5:
-                scores = output_results[:, 4]
-                bboxes = output_results[:, :4]
-                classes = output_results[:, -1]
-            elif output_results.shape[1] == 6:
-                scores = output_results[:, 4]
-                bboxes = output_results[:, :4]
-                classes = output_results[:, 5].astype(np.uint8)
-            else:
-                scores = output_results[:, 4] * output_results[:, 5]
-                bboxes = output_results[:, :4]  # x1y1x2y2
-                classes = output_results[:, -1]
+            # fetch these for deepstream pipeline from the probe 
+            ds_local_id = np.array([d['local_track_id'] for d in output_results])
+            scores = np.array([d['det_confidence'] for d in output_results])
+            bboxes = np.array([d['bbox'] for d in output_results])
+            classes = np.array([1 for d in output_results])
+            features = np.array([d['reid_vector'] for d in output_results])
+
+            # self.track_low_thresh = 0.8
+            # self.track_high_thresh = 0.9
+
+
+
+
+
             
-            # Remove bad detections
-
-            # for i, score in enumerate(scores):
-            #     if score > self.track_low_thresh: lowest_inds.append(i) 
-
-            # print(lowest_inds)
-
-
             lowest_inds = scores > self.track_low_thresh
             
             ds_local_id = ds_local_id[lowest_inds]
@@ -339,6 +326,16 @@ class BoTSORT(object):
             
             # Find high threshold detections
             remain_inds = scores > self.track_high_thresh
+
+
+            # print(f"ds_local_id = {ds_local_id.shape}")
+            # print(f"bboxes = {bboxes.shape}")
+            # print(f"scores = {scores.shape}")
+            # print(f"classes = {classes.shape}")
+            # print(f"features = {features.shape}")
+            # print (remain_inds)
+
+
             dets = bboxes[remain_inds]
             scores_keep = scores[remain_inds]
             classes_keep = classes[remain_inds]
@@ -346,7 +343,7 @@ class BoTSORT(object):
             features_keep = features[remain_inds]
             
             # pose input from new sgie, check for skeleton ya fir body ka 3d pose chahiye
-            # try to lower the number of points, if skeleton use karo toh.            
+            # try to lower the number of points, if skeleton use karo toh. 
             # pose_input = [{"bbox": det} for det in dets]
             # pose_input = dets 
         else:
@@ -358,34 +355,17 @@ class BoTSORT(object):
             classes_keep = []
             # pose_input = []
 
-        print(ds_local_id.shape)
-        print(bboxes.shape)
-        print(scores.shape)
-        print(classes.shape)
-        print(features.shape)
+        detections = [
+            STrack(
+                STrack.tlbr_to_tlwh(tlbr), s, f) 
+        for (tlbr, s, f) in zip(dets, scores_keep, features_keep)]
 
-        return
 
-        if len(dets) > 0:
-            '''Detections'''
-            if self.with_reid:
-                '''Extract embeddings '''
-                features_keep = self.encoder.inference(img, dets)
-
-                pose_result = inference_topdown(pose, img, pose_input, bbox_format='xyxy')
-                pose_result = np.array([np.concatenate([p.pred_instances.keypoints[0], np.expand_dims(p.pred_instances.keypoint_scores[0], axis=1)], axis=1) for p in pose_result])
-                num_kpts_per_bbox = count_kpts_per_bbox(pose_input, pose_result)
-                new_ratio = all_good_pose_bbox(pose_input, pose_result)
-                detections = [STrack(STrack.tlbr_to_tlwh(tlbr), s, f, {'keypoints': p}, n, img_path) for 
-                            (tlbr, s, f, p, n) in zip(dets, scores_keep, features_keep, pose_result, num_kpts_per_bbox)]
-            else:
-                detections = [STrack(STrack.tlbr_to_tlwh(tlbr), s) for
-                              (tlbr, s) in zip(dets, scores_keep)]
-        else:
-            new_ratio = None
-            detections = []
-
-        ''' Add newly detected tracklets to tracked_stracks'''
+######################################
+        ''' Step 1: ='''
+######################################
+######################################
+######################################
         unconfirmed = []
         tracked_stracks = []  # type: list[STrack]
         for track in self.tracked_stracks:
@@ -394,8 +374,34 @@ class BoTSORT(object):
             else:
                 tracked_stracks.append(track)
 
+        print(tracked_stracks)
+######################################
+######################################
+######################################
+######################################
+
+
+
+    
         ''' Step 2: First association, with high score detection boxes'''
         strack_pool = joint_stracks(tracked_stracks, self.lost_stracks)
+
+
+        '''
+        
+            def joint_stracks(tlista, tlistb):
+            exists = {}
+            res = []
+            for t in tlista:
+                exists[t.track_id] = 1
+                res.append(t)
+            for t in tlistb:
+                tid = t.track_id
+                if not exists.get(tid, 0):
+                    exists[tid] = 1
+                    res.append(t)
+            return res
+        '''
 
         # Predict the current location with KF
         STrack.multi_predict(strack_pool)
@@ -415,14 +421,12 @@ class BoTSORT(object):
         # centroid_dists_mask = (centroid_dists > self.proximity_thresh)
 
         if self.with_reid:
-            emb_dists = matching.embedding_distance(strack_pool, detections) / 2.0
+            emb_dists = matching.embedding_distance(strack_pool, detections) / 2.0 
 
             dists = 0.3 * centroid_dists + 0.7 * emb_dists 
             # dists = emb_dists
             dists[centroid_dists > self.euc_thresh] = 1.0
             dists[emb_dists > self.appearance_thresh] = 1.0
-        else:
-            dists = ious_dists
 
         matches, u_track, u_detection = matching.linear_assignment(dists, thresh=self.match_thresh)
 
@@ -530,6 +534,9 @@ class BoTSORT(object):
         
         # output_stracks = [track for track in self.tracked_stracks if track.is_activated]
         output_stracks = [track for track in self.tracked_stracks]
+
+        new_ratio = [0] * 7
+        new_ratio = np.array(new_ratio)
 
 
         # return output_stracks
