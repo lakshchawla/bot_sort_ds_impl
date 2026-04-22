@@ -109,17 +109,15 @@ def create_source_bin(index, uri):
     return nbin
 
 
-log = logging.getLogger("reid_tracker")
+DIAG = True   # flip False once tracklet_len is stable and incrementing
  
 _tracker = BoTSORT(
-    track_high_thresh  = 0.5,
+    track_high_thresh  = 0.4,
     track_low_thresh   = 0.1,
-    new_track_thresh   = 0.5,
+    new_track_thresh   = 0.4,
     track_buffer       = 30,
-    match_thresh       = 0.8,
-    with_reid          = True,
-    appearance_thresh  = 0.4,
-    euc_thresh         = 0.4,   # normalised; 0.4 ≈ 880px on 1080p
+    match_thresh       = 0.7,
+    with_reid          = True,  # flip True once SGIE embeddings are working
     frame_rate         = 30,
 )
  
@@ -152,9 +150,10 @@ def reid_pad_buffer_probe(pad, info, user_data):
         except StopIteration:
             break
  
-        # ── 1. Collect detections, keep obj_meta refs keyed by DS id ─────────
-        detections   = []
-        obj_meta_map = {}   # ds_id (int) → obj_meta
+        # ── 1. Collect detections as an ordered list ──────────────────────────
+        # Index in this list == matched_det_idx returned by BoTSORT.
+        # DS object_id is NOT used for matching – it is unstable.
+        det_list = []   # [(obj_meta, det_dict), ...]
  
         l_obj = frame_meta.obj_meta_list
         while l_obj is not None:
@@ -163,8 +162,8 @@ def reid_pad_buffer_probe(pad, info, user_data):
             except StopIteration:
                 break
  
-            ds_id = int(obj_meta.object_id)
-            r     = obj_meta.rect_params
+            r    = obj_meta.rect_params
+            conf = float(obj_meta.tracker_confidence) or float(obj_meta.confidence)
  
             embed = None
             l_user = obj_meta.obj_user_meta_list
@@ -176,10 +175,9 @@ def reid_pad_buffer_probe(pad, info, user_data):
                 if user_meta.base_meta.meta_type == \
                         pyds.NvDsMetaType.NVDSINFER_TENSOR_OUTPUT_META:
                     try:
-                        tensor_meta = pyds.NvDsInferTensorMeta.cast(
-                            user_meta.user_meta_data
+                        embed = _extract_embedding(
+                            pyds.NvDsInferTensorMeta.cast(user_meta.user_meta_data)
                         )
-                        embed = _extract_embedding(tensor_meta)
                     except Exception:
                         pass
                 try:
@@ -187,77 +185,71 @@ def reid_pad_buffer_probe(pad, info, user_data):
                 except StopIteration:
                     break
  
-            detections.append({
-                "local_track_id": ds_id,
+            det_dict = {
+                "local_track_id": int(obj_meta.object_id),
                 "bbox": np.array(
                     [r.left, r.top, r.left + r.width, r.top + r.height],
                     dtype=np.float32
                 ),
-                "det_confidence": float(obj_meta.tracker_confidence
-                                        or obj_meta.confidence),
-                "reid_vector": embed,
-            })
-            obj_meta_map[ds_id] = obj_meta
+                "det_confidence": conf,
+                "reid_vector":    embed,
+            }
+ 
+            if DIAG:
+                print(
+                    f"[DS]  frame={frame_meta.frame_num:5d}  "
+                    f"ds_id={int(obj_meta.object_id):4d}  "
+                    f"bbox=[{r.left:.0f},{r.top:.0f},"
+                    f"{r.left+r.width:.0f},{r.top+r.height:.0f}]  "
+                    f"conf={conf:.3f}  embed={'YES' if embed is not None else 'NO'}"
+                )
+ 
+            det_list.append((obj_meta, det_dict))
  
             try:
                 l_obj = l_obj.next
             except StopIteration:
                 break
  
-        # ── 2. Run BoTSORT ────────────────────────────────────────────────────
-        output_stracks = _tracker.update(detections)
+        # ── 2. Run tracker ────────────────────────────────────────────────────
+        output_stracks = _tracker.update([d for _, d in det_list])
  
-        # ── 3. Writeback via ds_id – no centroid guessing ────────────────────
-        # Each STrack carries .ds_id = the DS object_id of the detection that
-        # matched/created it this frame.  Use that to look up obj_meta directly.
-        #
-        # Build map: ds_id → global ReID track_id
-        ds_to_global = {t.ds_id: t.track_id for t in output_stracks if t.ds_id >= 0}
+        # ── 3. Writeback via matched_det_idx – O(1), no centroid search ───────
+        for t in output_stracks:
+            idx = t.matched_det_idx
+            if idx < 0 or idx >= len(det_list):
+                continue   # ghost track surviving from previous frames
  
-        for ds_id, obj_meta in obj_meta_map.items():
-            global_id = ds_to_global.get(ds_id)
-            if global_id is None:
-                # This DS object wasn't matched to any active track this frame
-                # (dropped below threshold or filtered).  Leave label as-is.
-                continue
+            obj_meta, _ = det_list[idx]
+            global_id   = t.track_id
  
-            # Stamp object_id for downstream plugins (Kafka, nvmsgconv)
             obj_meta.object_id = global_id
  
-            # OSD label – write to display_text (obj_label is not rendered by nvosd)
-            conf     = obj_meta.tracker_confidence or obj_meta.confidence
-            new_text = f"ReID:{global_id}\n{conf:.2f}"
-            obj_meta.text_params.display_text = new_text
+            conf     = float(obj_meta.tracker_confidence or obj_meta.confidence)
+            obj_meta.text_params.display_text = f"ReID:{global_id}\n{conf:.2f}"
             obj_meta.text_params.x_offset     = int(max(0, obj_meta.rect_params.left))
             obj_meta.text_params.y_offset     = int(max(0, obj_meta.rect_params.top - 30))
  
-            obj_meta.rect_params.border_width        = 1
-            obj_meta.rect_params.border_color.red    = 0.0
-            obj_meta.rect_params.border_color.green  = 1.0
-            obj_meta.rect_params.border_color.blue   = 0.0
-            obj_meta.rect_params.border_color.alpha  = 1.0
+            obj_meta.rect_params.border_width       = 1
+            obj_meta.rect_params.border_color.red   = 0.0
+            obj_meta.rect_params.border_color.green = 1.0
+            obj_meta.rect_params.border_color.blue  = 0.0
+            obj_meta.rect_params.border_color.alpha = 1.0
  
-        # ── 4. Debug log (free when DEBUG is off) ─────────────────────────────
-        if log.isEnabledFor(logging.DEBUG):
-            log.debug(
-                "[frame %d | src %d]  %d dets → %d active tracks",
-                frame_meta.frame_num, frame_meta.source_id,
-                len(detections), len(output_stracks),
+        if DIAG:
+            print(
+                f"[TR]  frame={frame_meta.frame_num:5d}  "
+                f"active={len(output_stracks)}  "
+                f"lost={len(_tracker.lost_stracks)}"
             )
             for t in output_stracks:
-                feat_ok = t.smooth_feat is not None
-                log.debug(
-                    "  DS_id=%-5d -> ReID=%-5d  tracklet_len=%-3d  feat_ok=%s",
-                    t.ds_id, t.track_id, t.tracklet_len, feat_ok,
+                status = "REID" if t.tracklet_len == 0 and t.is_activated else "OK"
+                print(
+                    f"      ReID={t.track_id:4d}  "
+                    f"det_idx={t.matched_det_idx:3d}  "
+                    f"tracklet_len={t.tracklet_len:3d}  "
+                    f"activated={t.is_activated}  [{status}]"
                 )
-            # Ghost tracks: active but no DS object matched them this frame
-            active_ds_ids = set(obj_meta_map.keys())
-            for t in output_stracks:
-                if t.ds_id not in active_ds_ids:
-                    log.debug(
-                        "  [ghost] ReID=%-5d  tracklet_len=%d",
-                        t.track_id, t.tracklet_len,
-                    )
  
         try:
             l_frame = l_frame.next
@@ -265,7 +257,6 @@ def reid_pad_buffer_probe(pad, info, user_data):
             break
  
     return Gst.PadProbeReturn.OK
-
 
 def main():
     Gst.init(None)
@@ -283,7 +274,6 @@ def main():
     streammux = Gst.ElementFactory.make("nvstreammux", "stream-muxer")
     pipeline.add(streammux)
 
-    # Parse Source List
     source_list_config = config.get('source-list', {})
     sources = []
     for key, value in source_list_config.items():

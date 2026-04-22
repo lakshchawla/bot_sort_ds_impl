@@ -13,9 +13,6 @@ import pdb
 import sys
 import math
 
-
-
-
 class ID_Assigner:
     def __init__(self, init_id=0):
         self.cur_id = init_id
@@ -48,6 +45,11 @@ class STrack(BaseTrack):
         self.alpha = 0.9
 
         self.centroid = np.asarray(self._tlwh[:2] + self._tlwh[2:] / 2, dtype=np.float16)
+        self.ds_id = -1
+
+
+        # tentative features
+
         self.t_global_id = 0
         self.global_id = 0
 
@@ -84,23 +86,23 @@ class STrack(BaseTrack):
                 stracks[i].mean = mean
                 stracks[i].covariance = cov
 
-    @staticmethod
-    def multi_gmc(stracks, H=np.eye(2, 3)):
-        if len(stracks) > 0:
-            multi_mean = np.asarray([st.mean.copy() for st in stracks])
-            multi_covariance = np.asarray([st.covariance for st in stracks])
+    # @staticmethod
+    # def multi_gmc(stracks, H=np.eye(2, 3)):
+    #     if len(stracks) > 0:
+    #         multi_mean = np.asarray([st.mean.copy() for st in stracks])
+    #         multi_covariance = np.asarray([st.covariance for st in stracks])
 
-            R = H[:2, :2]
-            R8x8 = np.kron(np.eye(4, dtype=float), R)
-            t = H[:2, 2]
+    #         R = H[:2, :2]
+    #         R8x8 = np.kron(np.eye(4, dtype=float), R)
+    #         t = H[:2, 2]
 
-            for i, (mean, cov) in enumerate(zip(multi_mean, multi_covariance)):
-                mean = R8x8.dot(mean)
-                mean[:2] += t
-                cov = R8x8.dot(cov).dot(R8x8.transpose())
+    #         for i, (mean, cov) in enumerate(zip(multi_mean, multi_covariance)):
+    #             mean = R8x8.dot(mean)
+    #             mean[:2] += t
+    #             cov = R8x8.dot(cov).dot(R8x8.transpose())
 
-                stracks[i].mean = mean
-                stracks[i].covariance = cov
+    #             stracks[i].mean = mean
+    #             stracks[i].covariance = cov
 
     def activate(self, kalman_filter, frame_id, id_assigner=None):
         """Start a new tracklet"""
@@ -239,7 +241,7 @@ class BoTSORT(object):
     def __init__(self,
                  track_high_thresh=0.6, 
                  track_low_thresh=0.1, 
-                 new_track_thresh=0.7, 
+                 new_track_thresh=0.5, 
                  track_buffer=30, 
                  match_thresh=0.8, 
                  with_reid=True, 
@@ -265,8 +267,8 @@ class BoTSORT(object):
         self.new_track_thresh = new_track_thresh
 
         self.buffer_size = int(frame_rate / 30.0 * track_buffer)
-        # self.max_time_lost = self.buffer_size
-        self.max_time_lost = 1
+        self.max_time_lost = self.buffer_size
+        # self.max_time_lost = 1
         self.kalman_filter = KalmanFilter()
 
         self.match_thresh = match_thresh
@@ -334,6 +336,7 @@ class BoTSORT(object):
             # print(f"classes = {classes.shape}")
             # print(f"features = {features.shape}")
             # print (remain_inds)
+
 
 
             dets = bboxes[remain_inds]
@@ -414,7 +417,7 @@ class BoTSORT(object):
         # Associate with high score detection boxes
 
         # if self.fuse_score:
-            # ious_dists = matching.fuse_score(ious_dists, detections)
+        #     ious_dists = matching.fuse_score(ious_dists, detections)
         
         centroid_dists = matching.centroid_distance(strack_pool, detections)
         centroid_dists /= self.max_len
@@ -429,6 +432,8 @@ class BoTSORT(object):
             dists[emb_dists > self.appearance_thresh] = 1.0
 
         matches, u_track, u_detection = matching.linear_assignment(dists, thresh=self.match_thresh)
+
+        print(matches)
 
         for itracked, idet in matches:
             track = strack_pool[itracked]
