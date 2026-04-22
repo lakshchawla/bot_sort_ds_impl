@@ -111,15 +111,7 @@ def create_source_bin(index, uri):
 
 DIAG = True   # flip False once tracklet_len is stable and incrementing
  
-_tracker = BoTSORT(
-    track_high_thresh  = 0.4,
-    track_low_thresh   = 0.1,
-    new_track_thresh   = 0.4,
-    track_buffer       = 30,
-    match_thresh       = 0.7,
-    with_reid          = True,  # flip True once SGIE embeddings are working
-    frame_rate         = 30,
-)
+_tracker = BoTSORT()
  
  
 def _extract_embedding(tensor_meta):

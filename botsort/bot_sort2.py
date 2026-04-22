@@ -156,13 +156,13 @@ class STrack(BaseTrack):
 class BoTSORT:
     def __init__(
         self,
-        track_high_thresh  = 0.4,   # lowered – DS tracker_conf often 0.5-0.8
+        track_high_thresh  = 0.5,   # lowered – DS tracker_conf often 0.5-0.8
         track_low_thresh   = 0.1,
         new_track_thresh   = 0.4,
         track_buffer       = 300,
         match_thresh       = 0.7,   # IOU threshold for first association
         with_reid          = False, # flip True once SGIE produces embeddings
-        appearance_thresh  = 0.25,
+        appearance_thresh  = 0.8,
         frame_rate         = 30,
         map_len            = None,
     ):
@@ -315,7 +315,7 @@ class BoTSORT:
             if self.with_reid and have_reid:
                 emb_lost = matching.embedding_distance(
                     self.lost_stracks, unmatched_dets_for_lost
-                ) / 2.0
+                ) / 2
                 cdist = 0.4 * cdist + 0.6 * emb_lost
                 cdist[emb_lost > self.appearance_thresh] = 1.0
 
