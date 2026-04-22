@@ -29,7 +29,7 @@ if path_to_botsort_parent not in sys.path:
     sys.path.append(path_to_botsort_parent)
 
  
-from botsort.bot_sort import BoTSORT
+from botsort.bot_sort2 import BoTSORT
 
 
 PERF_MODE = os.environ.get("NVDS_TEST3_PERF_MODE") == "1"

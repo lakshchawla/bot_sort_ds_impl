@@ -47,7 +47,7 @@ class MTrack(BaseTrack):
     
     def update_features(self, features, poses, img_paths, tlbrs, coords):
         self.curr_feat = features
-        self.curr_pose = poses
+        self.curr_pose = None
         self.curr_coords = coords
 
         for feat, pose, img_path, tlbr in zip(features, poses, img_paths, tlbrs):
@@ -79,7 +79,7 @@ class MTrack(BaseTrack):
                 self.poses.append(pose)
             else:
                 # self.features.extend(features)
-                for feat, img_path, tlbr in zip(features, poses, img_paths, tlbrs):
+                for feat,pose, img_path, tlbr in zip(features, poses, img_paths, tlbrs):
                     if img_path in self.path_tlbr: continue
                     self.features.append(feat)
                     self.path_tlbr[img_path] = tlbr
@@ -147,8 +147,8 @@ class MCTracker:
         # self.match_thresh = 0.99
         self.max_len = 1
 
-        self.clustering = AgglomerativeClustering(n_clusters=2, affinity='cosine', linkage='average')
-        # self.clustering = AgglomerativeClustering(n_clusters=2, metric='cosine', linkage='ward')
+        # self.clustering = AgglomerativeClustering(n_clusters=2, affinity='cosine', linkage='average')
+        self.clustering = AgglomerativeClustering(n_clusters=2, metric='cosine', linkage='ward')
 
         if int(scene.split('_')[1]) in range(61, 71):
             self.emb_thresh = 0.30

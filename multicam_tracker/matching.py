@@ -57,13 +57,13 @@ def ious(atlbrs, btlbrs):
 
     :rtype ious np.ndarray
     """
-    ious = np.zeros((len(atlbrs), len(btlbrs)), dtype=np.float)
+    ious = np.zeros((len(atlbrs), len(btlbrs)), dtype=np.float64)
     if ious.size == 0:
         return ious
 
     ious = bbox_ious(
-        np.ascontiguousarray(atlbrs, dtype=np.float),
-        np.ascontiguousarray(btlbrs, dtype=np.float)
+        np.ascontiguousarray(atlbrs, dtype=np.float64),
+        np.ascontiguousarray(btlbrs, dtype=np.float64)
     )
 
     return ious
@@ -133,11 +133,11 @@ def embedding_distance(atracks, btracks, metric='cosine'):
     :return: cost_matrix np.ndarray
     """
 
-    cost_matrix = np.zeros((len(atracks), len(btracks)), dtype=np.float)
+    cost_matrix = np.zeros((len(atracks), len(btracks)), dtype=np.float64)
     if cost_matrix.size == 0:
         return cost_matrix
-    atrack_features = np.asarray([feat for feat in atracks], dtype=np.float)
-    btrack_features = np.asarray([feat for feat in btracks], dtype=np.float)
+    atrack_features = np.asarray([feat for feat in atracks], dtype=np.float64)
+    btrack_features = np.asarray([feat for feat in btracks], dtype=np.float64)
 
     cost_matrix = np.maximum(0.0, cdist(atrack_features, btrack_features, metric))  # / 2.0  # Nomalized features
     return cost_matrix
@@ -150,11 +150,11 @@ def euclidean_distance(atracks, btracks, metric='euclidean'):
     :return: cost_matrix np.ndarray
     """
 
-    cost_matrix = np.zeros((len(atracks), len(btracks)), dtype=np.float)
+    cost_matrix = np.zeros((len(atracks), len(btracks)), dtype=np.float64)
     if cost_matrix.size == 0:
         return cost_matrix
-    atrack_locs = np.asarray([loc for loc in atracks], dtype=np.float)
-    btrack_locs = np.asarray([loc for loc in btracks], dtype=np.float)
+    atrack_locs = np.asarray([loc for loc in atracks], dtype=np.float64)
+    btrack_locs = np.asarray([loc for loc in btracks], dtype=np.float64)
 
     # cost_matrix = np.maximum(0.0, cdist(atrack_features, btrack_features, metric))  # / 2.0  # Nomalized features
     cost_matrix = cdist(atrack_locs, btrack_locs, metric)
