@@ -344,6 +344,8 @@ class BoTSORT(object):
             classes_keep = classes[remain_inds]
             ds_local_id_keep = ds_local_id[remain_inds]
             features_keep = features[remain_inds]
+            if not features_keep:
+                features_keep = N
             
             # pose input from new sgie, check for skeleton ya fir body ka 3d pose chahiye
             # try to lower the number of points, if skeleton use karo toh. 

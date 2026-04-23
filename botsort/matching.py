@@ -109,20 +109,29 @@ def v_iou_distance(atracks, btracks):
 
 
 def embedding_distance(tracks, detections, metric='cosine'):
-    """
-    :param tracks: list[STrack]
-    :param detections: list[BaseTrack]
-    :param metric:
-    :return: cost_matrix np.ndarray
-    """
-
-    cost_matrix = np.zeros((len(tracks), len(detections)), dtype=np.float16)
+    cost_matrix = np.zeros((len(tracks), len(detections)), dtype=np.float32)
     if cost_matrix.size == 0:
         return cost_matrix
-    det_features = np.asarray([track.curr_feat for track in detections], dtype=np.float16)
-    track_features = np.asarray([track.smooth_feat for track in tracks], dtype=np.float16)
 
-    cost_matrix = np.maximum(0.0, cdist(track_features, det_features, metric))  # / 2.0  # Nomalized features
+    # Guard: if any track has no feature, fall back to zero cost row
+    track_features = []
+    for t in tracks:
+        if t.smooth_feat is not None:
+            track_features.append(t.smooth_feat)
+        else:
+            track_features.append(np.zeros(256, dtype=np.float32))  # neutral
+
+    det_features = []
+    for d in detections:
+        if d.smooth_feat is not None:
+            det_features.append(d.smooth_feat)
+        else:
+            det_features.append(np.zeros(256, dtype=np.float32))
+
+    track_features = np.array(track_features, dtype=np.float32)  # (N, D) guaranteed 2D
+    det_features   = np.array(det_features,   dtype=np.float32)  # (M, D) guaranteed 2D
+
+    cost_matrix = np.maximum(0.0, cdist(track_features, det_features, metric))
     return cost_matrix
 
 def centroid_distance(tracks, detections, metric='euclidean'):

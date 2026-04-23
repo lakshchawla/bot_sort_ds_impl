@@ -37,7 +37,7 @@ class STrack(BaseTrack):
         self.tracklet_len  = 0
         self.smooth_feat   = None
         self.curr_feat     = None
-        self.alpha         = 0.9
+        self.alpha         = 0.95
         self.matched_det_idx = -1
 
         if feat is not None:
@@ -62,7 +62,13 @@ class STrack(BaseTrack):
         if self.smooth_feat is None:
             self.smooth_feat = feat
         else:
-            self.smooth_feat = self.alpha * self.smooth_feat + (1 - self.alpha) * feat
+            # Gate: only blend if cosine similarity is reasonable
+            # Rejects noisy/wrong detections that would pollute the gallery
+            sim = float(np.dot(self.smooth_feat, feat) /
+                        (np.linalg.norm(self.smooth_feat) * np.linalg.norm(feat) + 1e-6))
+            if sim > 0.3:   # same identity threshold — tune down if too strict
+                self.smooth_feat = self.alpha * self.smooth_feat + (1 - self.alpha) * feat
+            # if sim <= 0.3, skip this update entirely — likely a wrong detection
         norm = np.linalg.norm(self.smooth_feat)
         if norm > 0:
             self.smooth_feat /= norm
@@ -140,12 +146,12 @@ class STrack(BaseTrack):
             self.track_id = id_assigner.next_id() if id_assigner else self.next_id()
 
     def update(self, new_track, frame_id):
-        self.last_known_mean = self.mean.copy() 
         self.frame_id      = frame_id
         self.tracklet_len += 1
         self.mean, self.covariance = self.kalman_filter.update(
             self.mean, self.covariance, self.tlwh_to_xywh(new_track.tlwh)
         )
+        self.last_known_mean = self.mean.copy()   # ← after update, correct
         if new_track.curr_feat is not None:
             self.update_features(new_track.curr_feat)
         self.state         = TrackState.Tracked
@@ -225,12 +231,12 @@ class ProbationTrack:
 class BoTSORT:
     def __init__(
         self,
-        track_high_thresh  = 0.5,   # lowered – DS tracker_conf often 0.5-0.8
+        track_high_thresh  = 0.5,
         track_low_thresh   = 0.1,
         new_track_thresh   = 0.4,
         track_buffer       = 15000,
-        match_thresh       = 0.7,   # IOU threshold for first association
-        with_reid          = True, # flip True once SGIE produces embeddings
+        match_thresh       = 0.7,   
+        with_reid          = True, 
         appearance_thresh  = 0.35,
         frame_rate         = 30,
         map_len            = None,
@@ -343,15 +349,30 @@ class BoTSORT:
 
         iou_dists = matching.iou_distance(tracked_stracks, detections).astype(np.float64)
 
-        print(len(tracked_stracks) > 0)
+        # print(len(tracked_stracks) > 0)
+        # print(len(tracked_stracks) > 0)
 
         """
         check err this part
         """
-        if self.with_reid and have_reid and len(tracked_stracks) > 0 and len(detections) > 0:
-            print(self.with_reid and have_reid and len(tracked_stracks) > 0 and len(detections) > 0)
-            emb_dists = matching.embedding_distance(tracked_stracks, detections) / 2
-            dists     = 0 * iou_dists + 2 * emb_dists
+        # # CURRENT (wrong) — lines 352-358
+        # if len(tracked_stracks) > 0:
+        #     emb_dists = matching.embedding_distance(tracked_stracks, detections) / 2
+        #     dists     = 0.4 * iou_dists + 0.6 * emb_dists
+        #     dists[emb_dists > self.appearance_thresh] = 1.0
+        # else:
+        #     dists = iou_dists
+
+        # REPLACE WITH
+        tracks_have_feat = any(t.smooth_feat is not None for t in tracked_stracks)
+        dets_have_feat   = any(d.smooth_feat is not None for d in detections)
+
+        if self.with_reid and have_reid and tracks_have_feat and dets_have_feat \
+                and len(tracked_stracks) > 0 and len(detections) > 0:
+            
+            print("true")
+            emb_dists = matching.embedding_distance(tracked_stracks, detections) / 2.0
+            dists     = 0.4 * iou_dists + 0.6 * emb_dists
             dists[emb_dists > self.appearance_thresh] = 1.0
         else:
             dists = iou_dists
@@ -388,18 +409,31 @@ class BoTSORT:
             diff        = lost_centroids[:, None, :] - det_centroids[None, :, :]  # (L,D,2)
             cdist       = np.linalg.norm(diff, axis=2) / self.max_len             # (L,D)
 
-            # Also mix in embedding distance if available
-            if self.with_reid and have_reid:
-                emb_lost = matching.embedding_distance(
-                    self.lost_stracks, unmatched_dets_for_lost
-                ) / 2
-                cdist = 0.4 * cdist + 0.6 * emb_lost
-                cdist[emb_lost > self.appearance_thresh] = 1.0
-
-            # Relaxed threshold: 0.3 normalised ≈ 660px on 1080p – wide enough
-            # to handle re-entries after a few seconds of occlusion
+            ################
+            ################
+            ##############
             matches_lost, u_lost, u_det_after_lost = matching.linear_assignment(
-                cdist.astype(np.float64), thresh=0.3
+                cdist.astype(np.float64), thresh=0.3   # ← cdist, not dists_lost!
+            )
+
+            # REPLACE WITH — also fix the lost embedding guard same as above
+            lost_have_feat = any(t.smooth_feat is not None for t in self.lost_stracks)
+            dets_unmatched_have_feat = any(d.smooth_feat is not None for d in unmatched_dets_for_lost)
+
+            if self.with_reid and have_reid and lost_have_feat and dets_unmatched_have_feat:
+                emb_lost   = matching.embedding_distance(
+                    self.lost_stracks, unmatched_dets_for_lost
+                ) / 2.0
+                dists_lost = emb_lost.copy()
+                dists_lost[emb_lost > self.appearance_thresh] = 1.0
+                match_thresh_lost = self.appearance_thresh
+            else:
+                dists_lost = cdist.copy()
+                dists_lost[cdist > 0.4] = 1.0
+                match_thresh_lost = 0.4
+
+            matches_lost, u_lost, u_det_after_lost = matching.linear_assignment(
+                dists_lost.astype(np.float64), thresh=match_thresh_lost  # ← dists_lost now
             )
 
             for ilost, idet in matches_lost:
