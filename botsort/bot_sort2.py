@@ -370,7 +370,7 @@ class BoTSORT:
         if self.with_reid and have_reid and tracks_have_feat and dets_have_feat \
                 and len(tracked_stracks) > 0 and len(detections) > 0:
             
-            print("true")
+            print()
             emb_dists = matching.embedding_distance(tracked_stracks, detections) / 2.0
             dists     = 0.4 * iou_dists + 0.6 * emb_dists
             dists[emb_dists > self.appearance_thresh] = 1.0

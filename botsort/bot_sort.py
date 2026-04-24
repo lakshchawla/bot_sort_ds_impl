@@ -56,7 +56,8 @@ class STrack(BaseTrack):
         self.matched_dist = None
 
     def update_features(self, feat):
-        # feat /= np.linalg.norm(feat)
+        feat /= np.linalg.norm(feat)
+        # check for feature smoothenng, how you can improve that
         self.curr_feat = feat
         if self.smooth_feat is None:
             self.smooth_feat = feat
@@ -274,7 +275,6 @@ class BoTSORT(object):
         self.match_thresh = match_thresh
         self.fuse_score = fuse_score
 
-        # ReID module
         self._is_deepstream_app = is_deepstream_app
         self.with_reid = with_reid
         self.real_data = real_data
@@ -303,21 +303,12 @@ class BoTSORT(object):
 
         if len(output_results):
 
-            # fetch these for deepstream pipeline from the probe 
             ds_local_id = np.array([d['local_track_id'] for d in output_results])
             scores = np.array([d['det_confidence'] for d in output_results])
             bboxes = np.array([d['bbox'] for d in output_results])
             classes = np.array([1 for d in output_results])
             features = np.array([d['reid_vector'] for d in output_results])
 
-            # self.track_low_thresh = 0.8
-            # self.track_high_thresh = 0.9
-
-
-
-
-
-            
             lowest_inds = scores > self.track_low_thresh
             
             ds_local_id = ds_local_id[lowest_inds]
@@ -326,26 +317,13 @@ class BoTSORT(object):
             classes = classes[lowest_inds]
             features = features[lowest_inds]
             
-            # Find high threshold detections
             remain_inds = scores > self.track_high_thresh
-
-
-            # print(f"ds_local_id = {ds_local_id.shape}")
-            # print(f"bboxes = {bboxes.shape}")
-            # print(f"scores = {scores.shape}")
-            # print(f"classes = {classes.shape}")
-            # print(f"features = {features.shape}")
-            # print (remain_inds)
-
-
 
             dets = bboxes[remain_inds]
             scores_keep = scores[remain_inds]
             classes_keep = classes[remain_inds]
             ds_local_id_keep = ds_local_id[remain_inds]
             features_keep = features[remain_inds]
-            if not features_keep:
-                features_keep = N
             
             # pose input from new sgie, check for skeleton ya fir body ka 3d pose chahiye
             # try to lower the number of points, if skeleton use karo toh. 
@@ -363,14 +341,10 @@ class BoTSORT(object):
         detections = [
             STrack(
                 STrack.tlbr_to_tlwh(tlbr), s, f) 
-        for (tlbr, s, f) in zip(dets, scores_keep, features_keep)]
+            for (tlbr, s, f) in zip(dets, scores_keep, features_keep)
+        ]
 
-
-######################################
-        ''' Step 1: ='''
-######################################
-######################################
-######################################
+        ''' Step: 1 '''
         unconfirmed = []
         tracked_stracks = []  # type: list[STrack]
         for track in self.tracked_stracks:
@@ -379,21 +353,19 @@ class BoTSORT(object):
             else:
                 tracked_stracks.append(track)
 
-        print(tracked_stracks)
-######################################
-######################################
-######################################
-######################################
+        # print(f"tracked_stracks: {tracked_stracks}")
 
+        # if tracked_stracks:
+        #     for i in range(len(tracked_stracks)):
+        #         print(tracked_stracks[i].is_activated) 
 
-
-    
         ''' Step 2: First association, with high score detection boxes'''
         strack_pool = joint_stracks(tracked_stracks, self.lost_stracks)
-
+        print(f"tracked_stracks, self.lost_stracks", tracked_stracks, self.lost_stracks)
 
         '''
-        
+            function_def: 
+
             def joint_stracks(tlista, tlistb):
             exists = {}
             res = []
@@ -423,19 +395,24 @@ class BoTSORT(object):
         
         centroid_dists = matching.centroid_distance(strack_pool, detections)
         centroid_dists /= self.max_len
+
+        '''
+        filter if strack is lost for a particular time, freeze its postion, from where it was lost
+        '''
+
         # centroid_dists_mask = (centroid_dists > self.proximity_thresh)
 
         if self.with_reid:
             emb_dists = matching.embedding_distance(strack_pool, detections) / 2.0 
+            print(emb_dists)
 
             dists = 0.3 * centroid_dists + 0.7 * emb_dists 
-            # dists = emb_dists
+            dists = emb_dists
             dists[centroid_dists > self.euc_thresh] = 1.0
             dists[emb_dists > self.appearance_thresh] = 1.0
 
         matches, u_track, u_detection = matching.linear_assignment(dists, thresh=self.match_thresh)
-
-        print(matches)
+        print(matches, u_track, u_detection)
 
         for itracked, idet in matches:
             track = strack_pool[itracked]

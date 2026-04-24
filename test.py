@@ -54,15 +54,13 @@ for i in range(0,3427):
     cur_frame += 1
     if os.path.exists(f"{ROOT_FRAME_DIR}/batch_frame_{i}.npy"):
         #iterate through
-        
-        frame_content = np.load(f"{ROOT_FRAME_DIR}/batch_frame_{200}.npy", allow_pickle=True)
+        frame_content = np.load(f"{ROOT_FRAME_DIR}/batch_frame_{200+i}.npy", allow_pickle=True)
 
     detections = frame_content[0]['objects']
     tracker.update(detections)
 
     for t in tracker.tracked_stracks:
         t.t_global_id = id_distributor.assign_id()
-        print(t.t_global_id)
     
     groups = clustering.update([tracker], cur_frame, scene)
     # mc_tracker.update([tracker], groups)
