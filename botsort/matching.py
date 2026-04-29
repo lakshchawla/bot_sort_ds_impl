@@ -112,26 +112,10 @@ def embedding_distance(tracks, detections, metric='cosine'):
     cost_matrix = np.zeros((len(tracks), len(detections)), dtype=np.float32)
     if cost_matrix.size == 0:
         return cost_matrix
+    det_features = np.asarray([track.curr_feat for track in detections], dtype=np.float32)
+    track_features = np.asarray([track.smooth_feat for track in tracks], dtype=np.float32)
 
-    # Guard: if any track has no feature, fall back to zero cost row
-    track_features = []
-    for t in tracks:
-        if t.smooth_feat is not None:
-            track_features.append(t.smooth_feat)
-        else:
-            track_features.append(np.zeros(256, dtype=np.float32))  # neutral
-
-    det_features = []
-    for d in detections:
-        if d.smooth_feat is not None:
-            det_features.append(d.smooth_feat)
-        else:
-            det_features.append(np.zeros(256, dtype=np.float32))
-
-    track_features = np.array(track_features, dtype=np.float32)  # (N, D) guaranteed 2D
-    det_features   = np.array(det_features,   dtype=np.float32)  # (M, D) guaranteed 2D
-
-    cost_matrix = np.maximum(0.0, cdist(track_features, det_features, metric))
+    cost_matrix = np.maximum(0.0, cdist(track_features, det_features, metric))  # / 2.0  # Nomalized features
     return cost_matrix
 
 def centroid_distance(tracks, detections, metric='euclidean'):
@@ -145,10 +129,26 @@ def centroid_distance(tracks, detections, metric='euclidean'):
     cost_matrix = np.zeros((len(tracks), len(detections)), dtype=np.float16)
     if cost_matrix.size == 0:
         return cost_matrix
+
     det_centroids = np.asarray([track.centroid for track in detections], dtype=np.float16)
     track_centroids = np.asarray([track.centroid for track in tracks], dtype=np.float16)
-    cost_matrix = cdist(track_centroids, det_centroids, metric)
-    return cost_matrix
+    
+    try:
+        cost_matrix = cdist(track_centroids, det_centroids, metric)
+        return cost_matrix
+    
+    except ValueError as e:
+        print("\n--- [ERROR] cdist Dimension Mismatch ---")
+        print(f"Original Exception: {e}")
+        print(f"track_centroids shape: {det_centroids.shape}")
+        print(f"det_centroids shape:   {track_centroids.shape}")
+        print("----------------------------------------\n")
+        
+        # You have two options here on how to handle the failure:
+        
+        # Option 1: Re-raise the error so the script stops, but now you know the shapes
+        raise e
+    return None
 
 def gate_cost_matrix(kf, cost_matrix, tracks, detections, only_position=False):
     if cost_matrix.size == 0:
