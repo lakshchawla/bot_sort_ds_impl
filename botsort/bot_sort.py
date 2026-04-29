@@ -281,8 +281,8 @@ class BoTSORT(object):
         lost_stracks = []
         removed_stracks = []
         
-        print(self.tracked_stracks)
-        print(self.lost_stracks)
+        # print(self.tracked_stracks)
+        # print(self.lost_stracks)
 
         if len(output_results):
             scores = np.array([d['det_confidence'] for d in output_results])
@@ -369,17 +369,26 @@ class BoTSORT(object):
         # if self.fuse_score:
             # ious_dists = matching.fuse_score(ious_dists, detections)
         
-        centroid_dists = matching.centroid_distance(strack_pool, detections)
-        centroid_dists /= self.max_len
+        # centroid_dists = matching.centroid_distance(strack_pool, detections)
+        # centroid_dists /= self.max_len
         # centroid_dists_mask = (centroid_dists > self.proximity_thresh)
 
-        if self.with_reid:
-            emb_dists = matching.embedding_distance(strack_pool, detections) / 2.0
 
-            dists = 0.4 * centroid_dists + 0.6 * emb_dists 
-            # dists = emb_dists
-            dists[centroid_dists > self.euc_thresh] = 1.0
-            dists[emb_dists > self.appearance_thresh] = 1.0
+        ious_dists = matching.iou_distance(strack_pool, detections)
+
+        if self.with_reid:
+            emb_dists = matching.embedding_distance(strack_pool, detections)
+            print(f"[EMBD]: {emb_dists}")
+            print(f"[IOUS]: {ious_dists}")
+            valid_mask = np.logical_and(
+                emb_dists < self.appearance_thresh, 
+                ious_dists < self.proximity_thresh
+            )
+            
+            hat_emb_dists = np.ones_like(emb_dists)
+            hat_emb_dists[valid_mask] = emb_dists[valid_mask]
+            # print(hat_emb_dists)
+            dists = np.minimum(ious_dists, hat_emb_dists)
             
         else:
             dists = ious_dists
@@ -441,16 +450,19 @@ class BoTSORT(object):
         detections = [detections[i] for i in u_detection]
         # if self.fuse_score:
         #     ious_dists = matching.fuse_score(ious_dists, detections)
-        centroid_dists = matching.centroid_distance(unconfirmed, detections)
-        centroid_dists /= self.max_len
+        # dists = matching.iou_distance(r_tracked_stracks, detections_second)
+        ious_dists = matching.iou_distance(unconfirmed, detections)
 
         if self.with_reid:
-            emb_dists = matching.embedding_distance(unconfirmed, detections) / 2.0
-
-            dists = 0.4 * centroid_dists + 0.6 * emb_dists 
-            # dists = emb_dists
-            dists[centroid_dists > self.euc_thresh] = 1.0
-            dists[emb_dists > self.appearance_thresh] = 1.0
+            emb_dists = matching.embedding_distance(unconfirmed, detections)
+            valid_mask = np.logical_and(
+                emb_dists < self.appearance_thresh, 
+                ious_dists < self.proximity_thresh
+            )
+            
+            hat_emb_dists = np.ones_like(emb_dists)
+            hat_emb_dists[valid_mask] = 0.5 * emb_dists[valid_mask]
+            dists = np.minimum(ious_dists, hat_emb_dists)
         else:
             dists = ious_dists
 

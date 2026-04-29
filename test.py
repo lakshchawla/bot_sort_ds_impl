@@ -78,28 +78,29 @@ from multicam_tracker.cluster_track import MCTracker
 
 args = {
     'max_batch_size' : 32,
-    'track_buffer' : 10000,
+    'track_buffer' : 30,            
     'with_reid' : True,
-    'sct_appearance_thresh' : 0.8,
-    'sct_euclidean_thresh' : 0.1,
-    'clt_appearance_thresh' : 0.9,
-    'clt_euclidean_thresh' : 0.3,
-    'mct_appearance_thresh' : 0.9,
+    'sct_appearance_thresh' : 0.25,  
+    'sct_euclidean_thresh' : 0.1,    
+    'clt_appearance_thresh' : 0.25,  
+    'clt_euclidean_thresh' : 0.3,    
+    'mct_appearance_thresh' : 0.25,  
+    
     'frame_rate' : 30,
     'write_vid' : False,
 }
 
 tracker = BoTSORT(
-    track_high_thresh=0.7, 
-    track_low_thresh=0.1, 
-    new_track_thresh=0.5, 
-    track_buffer=30, 
-    match_thresh=0.8, 
+    track_high_thresh=0.6,    # Standard YOLO/ByteTrack high threshold
+    track_low_thresh=0.1,     # Correct: Used for second-association
+    new_track_thresh=0.7,     # Strict confidence needed to spawn a new ID
+    track_buffer=30,          # Standard memory retention (1 second at 30fps)
+    match_thresh=0.8,         # First association matching threshold of 0.8 is standard 
     with_reid=True, 
-    proximity_thresh=0.5, 
-    appearance_thresh=0.9, 
-    euc_thresh=0.1, 
-    fuse_score=True, 
+    proximity_thresh=0.5,     # Maps to theta_iou = 0.5 
+    appearance_thresh=0.25,   # Maps to theta_emb = 0.25 
+    euc_thresh=0.1,           # (Vestigial if pure IoU is used, but safe to keep)
+    fuse_score=True,          
     frame_rate=30, 
     max_batch_size=8, 
     map_len=None, 
@@ -128,6 +129,8 @@ for i in range(3000):
         continue
 
     detections = frame_content[0]['objects']
+    for d in detections:
+        d['obj_meta'] = None 
     
     # 1. Update Tracker
     all_tracks= tracker.update(detections)
