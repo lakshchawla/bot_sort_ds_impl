@@ -60,7 +60,7 @@ path_to_botsort_parent = './'
 if path_to_botsort_parent not in sys.path:
     sys.path.append(path_to_botsort_parent)
 
-ROOT_FRAME_DIR = "/home/lab314/workspace/reid/ds_backend_reid/MCDPT/deepstream_npy_output"
+ROOT_FRAME_DIR = "./deepstream_npy_output"
 
 
 def _extract_embedding(tensor_meta) -> np.ndarray | None:
@@ -78,8 +78,12 @@ from multicam_tracker.cluster_track import MCTracker
 
 args = {
     'max_batch_size' : 32,
-    'track_buffer' : 30,            
+    'track_buffer' : 600,             # FIXED: Prevents fatal memory bloat
     'with_reid' : True,
+    
+    # Assuming SCT/CLT/MCT refer to Single/Cross/Multi-Camera tracking
+    # If these evaluate distance (lower is better), use 0.25. 
+    # (If they evaluate similarity where 1.0 is best, then 0.8/0.9 is fine).
     'sct_appearance_thresh' : 0.25,  
     'sct_euclidean_thresh' : 0.1,    
     'clt_appearance_thresh' : 0.25,  
@@ -94,10 +98,10 @@ tracker = BoTSORT(
     track_high_thresh=0.6,    # Standard YOLO/ByteTrack high threshold
     track_low_thresh=0.1,     # Correct: Used for second-association
     new_track_thresh=0.7,     # Strict confidence needed to spawn a new ID
-    track_buffer=30,          # Standard memory retention (1 second at 30fps)
+    track_buffer=600,          # Standard memory retention (1 second at 30fps)
     match_thresh=0.8,         # First association matching threshold of 0.8 is standard 
     with_reid=True, 
-    proximity_thresh=0.5,     # Maps to theta_iou = 0.5 
+    proximity_thresh=0.7,     # Maps to theta_iou = 0.5 
     appearance_thresh=0.25,   # Maps to theta_emb = 0.25 
     euc_thresh=0.1,           # (Vestigial if pure IoU is used, but safe to keep)
     fuse_score=True,          
@@ -121,7 +125,7 @@ for i in range(3000):
     cur_frame += 1
     
     # Load frame data
-    npy_path = f"{ROOT_FRAME_DIR}/batch_frame_{400+i}.npy"
+    npy_path = f"{ROOT_FRAME_DIR}/batch_frame_{i}.npy"
     if os.path.exists(npy_path):
         frame_content = np.load(npy_path, allow_pickle=True)
     else:

@@ -113,9 +113,11 @@ def embedding_distance(tracks, detections, metric='cosine'):
     if cost_matrix.size == 0:
         return cost_matrix
     det_features = np.asarray([track.curr_feat for track in detections], dtype=np.float32)
+    print(det_features.shape)
     track_features = np.asarray([track.smooth_feat for track in tracks], dtype=np.float32)
+    print(track_features.shape)
 
-    cost_matrix = np.maximum(0.0, cdist(track_features, det_features, metric))  # / 2.0  # Nomalized features
+    cost_matrix = np.maximum(0.0, cdist(track_features, det_features, metric)) # / 2.0  # Nomalized features
     return cost_matrix
 
 def centroid_distance(tracks, detections, metric='euclidean'):

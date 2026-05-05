@@ -81,6 +81,9 @@ class STrack(BaseTrack):
             for i, (mean, cov) in enumerate(zip(multi_mean, multi_covariance)):
                 stracks[i].mean = mean
                 stracks[i].covariance = cov
+                
+                print(mean)
+                print(cov)
 
     @staticmethod
     def multi_gmc(stracks, H=np.eye(2, 3)):
@@ -239,7 +242,7 @@ class STrack(BaseTrack):
 class BoTSORT(object):
     def __init__(self, track_high_thresh=0.6, track_low_thresh=0.1, new_track_thresh=0.7, track_buffer=30, 
                 match_thresh=0.8, with_reid=True, proximity_thresh=0.5, appearance_thresh=0.4, euc_thresh=0.1, 
-                fuse_score=True, frame_rate=30, max_batch_size=8, map_len=None, real_data=True):
+                fuse_score=True, frame_rate=30, max_batch_size=8, map_len=None, real_data=True, registry = None):
         self.tracked_stracks = []  # type: list[STrack]
         self.lost_stracks = []  # type: list[STrack]
         self.removed_stracks = []  # type: list[STrack]
@@ -270,6 +273,8 @@ class BoTSORT(object):
         self.max_len = map_len if map_len else np.sqrt(1920**2 + 1080**2)
 
         self.id_assigner = ID_Assigner()
+        self.registry = registry
+        
         # self.encoder = FastReIDInterface('./reid/configs/AIC24/sbs_R50-ibn.yml', './pretrained/market_aic_sbs_R50-ibn.pth', 'cuda')
         # self.id_assigner = None
         # self.gmc = GMC(method=args.cmc_method, verbose=[args.name, args.ablation])
@@ -281,8 +286,8 @@ class BoTSORT(object):
         lost_stracks = []
         removed_stracks = []
         
-        # print(self.tracked_stracks)
-        # print(self.lost_stracks)
+        print(self.tracked_stracks)
+        print(self.lost_stracks)
 
         if len(output_results):
             scores = np.array([d['det_confidence'] for d in output_results])
@@ -480,7 +485,6 @@ class BoTSORT(object):
             track = detections[inew]
             if track.score < self.new_track_thresh:
                 continue
-
             track.activate(self.kalman_filter, self.frame_id, id_assigner=self.id_assigner)
             activated_starcks.append(track)
 
@@ -489,6 +493,9 @@ class BoTSORT(object):
             if self.frame_id - track.end_frame > self.max_time_lost:
                 track.mark_removed()
                 removed_stracks.append(track)
+                # ← ADD THESE 2 LINES:
+                if self.registry is not None:
+                    self.registry.deactivate_track(track.track_id)
 
         """ Merge """
         self.tracked_stracks = [t for t in self.tracked_stracks if t.state == TrackState.Tracked]
@@ -503,8 +510,17 @@ class BoTSORT(object):
         
         # output_stracks = [track for track in self.tracked_stracks if track.is_activated]
         output_stracks = [track for track in self.tracked_stracks]
-
-
+        
+        disp_curr = np.array([t.t_global_id for t in activated_starcks])
+        print(f"[CURR] {disp_curr}")
+        
+        disp_lost = np.array([t.t_global_id for t in self.lost_stracks])
+        print(f"[LOST] {disp_lost}")
+        
+        if not len(unconfirmed): 
+            disp_uncm = np.array([t.t_global_id for t in activated_starcks])
+            # print(f"[UNCM] {disp_uncm}")
+        
         # return output_stracks
         return output_stracks
 
