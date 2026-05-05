@@ -29,20 +29,20 @@ from botsort.global_registry import GlobalRegistry
 
 
 registry = GlobalRegistry(
-    match_threshold=0.3,  
+    match_threshold=0.25,  
     min_frames=5,          
-    max_emb=50,            
+    max_emb=10,            
 )
 
 tracker = BoTSORT(
     track_high_thresh=0.6,
-    track_low_thresh=0,
-    new_track_thresh=0.7,
+    track_low_thresh=0.1,
+    new_track_thresh=0.3,
     track_buffer=600,
     match_thresh=0.8,
     with_reid=True,
     proximity_thresh=0.7,
-    appearance_thresh=0.25,
+    appearance_thresh=0.50,
     euc_thresh=0.1,
     fuse_score=True,
     frame_rate=30,

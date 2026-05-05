@@ -239,7 +239,7 @@ class STrack(BaseTrack):
 
 class BoTSORT(object):
     def __init__(self, track_high_thresh=0.6, track_low_thresh=0.1, new_track_thresh=0.7, track_buffer=30, 
-                match_thresh=0.8, with_reid=True, proximity_thresh=0.5, appearance_thresh=0.4, euc_thresh=0.1, 
+                match_thresh=0.8, with_reid=True, proximity_thresh=0.2, appearance_thresh=0.4, euc_thresh=0.1, 
                 fuse_score=True, frame_rate=30, max_batch_size=8, map_len=None, real_data=True, registry = None):
         self.tracked_stracks = []  # type: list[STrack]
         self.lost_stracks = []  # type: list[STrack]
@@ -254,7 +254,7 @@ class BoTSORT(object):
 
         self.buffer_size = int(frame_rate / 30.0 * track_buffer)
         # self.max_time_lost = self.buffer_size
-        self.max_time_lost = 2000
+        self.max_time_lost = 90
         self.kalman_filter = KalmanFilter()
 
         self.match_thresh = match_thresh
@@ -283,9 +283,6 @@ class BoTSORT(object):
         refind_stracks = []
         lost_stracks = []
         removed_stracks = []
-        
-        print(self.tracked_stracks)
-        print(self.lost_stracks)
 
         if len(output_results):
             scores = np.array([d['det_confidence'] for d in output_results])
@@ -381,8 +378,6 @@ class BoTSORT(object):
 
         if self.with_reid:
             emb_dists = matching.embedding_distance(strack_pool, detections)
-            print(f"[EMBD]: {emb_dists}")
-            print(f"[IOUS]: {ious_dists}")
             valid_mask = np.logical_and(
                 emb_dists < self.appearance_thresh, 
                 ious_dists < self.proximity_thresh
