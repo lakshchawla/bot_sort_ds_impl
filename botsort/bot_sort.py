@@ -81,9 +81,7 @@ class STrack(BaseTrack):
             for i, (mean, cov) in enumerate(zip(multi_mean, multi_covariance)):
                 stracks[i].mean = mean
                 stracks[i].covariance = cov
-                
-                print(mean)
-                print(cov)
+
 
     @staticmethod
     def multi_gmc(stracks, H=np.eye(2, 3)):
