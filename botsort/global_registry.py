@@ -108,7 +108,7 @@ class GlobalRegistry:
     def __init__(
         self,
         match_threshold: float = 0.35,   # cosine distance below which → same person
-        min_frames:      int   = 5,       # track must be confirmed for N frames before
+        min_frames:      int   = 10,       # track must be confirmed for N frames before
                                           # registering, avoids polluting gallery with ghosts
         max_emb:         int   = 50,      # rolling embedding buffer per entry
     ):
@@ -183,14 +183,11 @@ class GlobalRegistry:
         if not valid_feats:
             return results
 
-        # (N_gallery, D)
         centroids = np.stack([e.centroid for e in self._entries], axis=0)
-        # (N_query, D)
         query_mat = np.stack(valid_feats, axis=0)
 
-        # (N_gallery, N_query)
         cos_sims  = centroids @ query_mat.T
-        cos_dists = 1.0 - cos_sims   # lower = better
+        cos_dists = 1.0 - cos_sims  
 
         for qi, orig_i in enumerate(valid_idx):
             col       = cos_dists[:, qi]
@@ -202,8 +199,6 @@ class GlobalRegistry:
                 results[orig_i] = (None, best_dist)
 
         return results
-
-    # ── Register / update / deactivate ───────────────────────────────────────
 
     def _register_new(
         self,
@@ -228,7 +223,6 @@ class GlobalRegistry:
 
     def _link_existing(self, entry: GalleryEntry, track_id: int):
         """Link an existing gallery entry to a (new) BoTSORT track_id."""
-        # Deactivate any previous track that was linked to this entry
         old_tid = entry.active_tid
         if old_tid is not None and old_tid in self._tid_to_gid:
             del self._tid_to_gid[old_tid]

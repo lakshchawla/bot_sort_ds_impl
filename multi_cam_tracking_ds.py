@@ -14,25 +14,52 @@ import numpy as np
 import time
 import threading
 from collections import defaultdict
-from scipy.optimize import linear_sum_assignment
-import logging
 
-
-import ctypes
-import numpy as np
-import pyds
-from gi.repository import Gst
+from glob import glob
 
 path_to_botsort_parent = '/home/lab314/workspace/reid/botsort-tracker'
 
 if path_to_botsort_parent not in sys.path:
     sys.path.append(path_to_botsort_parent)
-
  
-from botsort.bot_sort2 import BoTSORT
+from botsort.bot_sort import BoTSORT
+from multicam_tracker.clustering import Clustering, ID_Distributor
+from multicam_tracker.cluster_track import MCTracker
+from botsort.global_registry import GlobalRegistry
 
+
+registry = GlobalRegistry(
+    match_threshold=0.3,  
+    min_frames=5,          
+    max_emb=50,            
+)
+
+tracker = BoTSORT(
+    track_high_thresh=0.6,
+    track_low_thresh=0,
+    new_track_thresh=0.7,
+    track_buffer=600,
+    match_thresh=0.8,
+    with_reid=True,
+    proximity_thresh=0.7,
+    appearance_thresh=0.25,
+    euc_thresh=0.1,
+    fuse_score=True,
+    frame_rate=30,
+    max_batch_size=8,
+    map_len=None,
+    real_data=True,
+    registry=registry,      
+)
+
+clustering    = Clustering(appearance_thresh=0.75, euc_thresh=0.3, match_thresh=0.8)
+scene         = 'scene_061'
+mc_tracker    = MCTracker(appearance_thresh=0.25, match_thresh=0.8, scene=scene)
+id_distributor = ID_Distributor()
 
 PERF_MODE = os.environ.get("NVDS_TEST3_PERF_MODE") == "1"
+cur_frame  = 0
+ACTIVE_FORMAT = "tlwh"
 
 def bus_call(bus, message, loop):
     t = message.type
@@ -109,145 +136,260 @@ def create_source_bin(index, uri):
     return nbin
 
 
-DIAG = True   # flip False once tracklet_len is stable and incrementing
- 
-_tracker = BoTSORT()
- 
- 
-def _extract_embedding(tensor_meta):
-    layer     = pyds.get_nvds_LayerInfo(tensor_meta, 0)
-    embed_len = 1
-    for i in range(layer.inferDims.numDims):
-        embed_len *= layer.inferDims.d[i]
-    ptr = ctypes.cast(
-        pyds.get_ptr(layer.buffer),
-        ctypes.POINTER(ctypes.c_float)
-    )
-    return np.ctypeslib.as_array(ptr, shape=(embed_len,)).copy().astype(np.float32)
- 
- 
-def reid_pad_buffer_probe(pad, info, user_data):
+def reid_pad_buffer_probe(pad, info, u_data):
     gst_buffer = info.get_buffer()
     if not gst_buffer:
         return Gst.PadProbeReturn.OK
- 
+
     batch_meta = pyds.gst_buffer_get_nvds_batch_meta(hash(gst_buffer))
-    if not batch_meta:
-        return Gst.PadProbeReturn.OK
- 
+    array_of_frames = []
+
     l_frame = batch_meta.frame_meta_list
     while l_frame is not None:
         try:
             frame_meta = pyds.NvDsFrameMeta.cast(l_frame.data)
         except StopIteration:
             break
- 
-        # ── 1. Collect detections as an ordered list ──────────────────────────
-        # Index in this list == matched_det_idx returned by BoTSORT.
-        # DS object_id is NOT used for matching – it is unstable.
-        det_list = []   # [(obj_meta, det_dict), ...]
- 
+
+        # --- Step 1: Build detections list (mirrors dummy script format) ---
+        detections = []
+        obj_meta_list = []  # parallel list to detections, same index order
+
         l_obj = frame_meta.obj_meta_list
         while l_obj is not None:
             try:
                 obj_meta = pyds.NvDsObjectMeta.cast(l_obj.data)
+                # print(sys.getsizeof(l_obj.data)) 
+                # print(sys.getsizeof(hash(obj_meta))) 
             except StopIteration:
                 break
- 
-            r    = obj_meta.rect_params
-            conf = float(obj_meta.tracker_confidence) or float(obj_meta.confidence)
- 
-            embed = None
+
+            obj_meta.rect_params.border_color.set(0.0, 0.0, 1.0, 1.0)
+            obj_meta.rect_params.border_width = 1 
+            obj_meta.text_params.display_text = ""
+            reid_vector = None
+
             l_user = obj_meta.obj_user_meta_list
             while l_user is not None:
                 try:
                     user_meta = pyds.NvDsUserMeta.cast(l_user.data)
                 except StopIteration:
                     break
-                if user_meta.base_meta.meta_type == \
-                        pyds.NvDsMetaType.NVDSINFER_TENSOR_OUTPUT_META:
-                    try:
-                        embed = _extract_embedding(
-                            pyds.NvDsInferTensorMeta.cast(user_meta.user_meta_data)
-                        )
-                    except Exception:
-                        pass
-                try:
-                    l_user = l_user.next
-                except StopIteration:
-                    break
- 
-            det_dict = {
-                "local_track_id": int(obj_meta.object_id),
-                "bbox": np.array(
-                    [r.left, r.top, r.left + r.width, r.top + r.height],
-                    dtype=np.float32
-                ),
-                "det_confidence": conf,
-                "reid_vector":    embed,
-            }
- 
-            if DIAG:
-                print(
-                    f"[DS]  frame={frame_meta.frame_num:5d}  "
-                    f"ds_id={int(obj_meta.object_id):4d}  "
-                    f"bbox=[{r.left:.0f},{r.top:.0f},"
-                    f"{r.left+r.width:.0f},{r.top+r.height:.0f}]  "
-                    f"conf={conf:.3f}  embed={'YES' if embed is not None else 'NO'}"
-                )
- 
-            det_list.append((obj_meta, det_dict))
- 
-            try:
-                l_obj = l_obj.next
-            except StopIteration:
-                break
- 
-        # ── 2. Run tracker ────────────────────────────────────────────────────
-        output_stracks = _tracker.update([d for _, d in det_list])
- 
-        # ── 3. Writeback via matched_det_idx – O(1), no centroid search ───────
-        for t in output_stracks:
-            idx = t.matched_det_idx
-            if idx < 0 or idx >= len(det_list):
-                continue   # ghost track surviving from previous frames
- 
-            obj_meta, _ = det_list[idx]
-            global_id   = t.track_id
- 
-            obj_meta.object_id = global_id
- 
-            conf     = float(obj_meta.tracker_confidence or obj_meta.confidence)
-            obj_meta.text_params.display_text = f"ReID:{global_id}\n{conf:.2f}"
-            obj_meta.text_params.x_offset     = int(max(0, obj_meta.rect_params.left))
-            obj_meta.text_params.y_offset     = int(max(0, obj_meta.rect_params.top - 30))
- 
-            obj_meta.rect_params.border_width       = 1
-            obj_meta.rect_params.border_color.red   = 0.0
-            obj_meta.rect_params.border_color.green = 1.0
-            obj_meta.rect_params.border_color.blue  = 0.0
-            obj_meta.rect_params.border_color.alpha = 1.0
- 
-        if DIAG:
-            print(
-                f"[TR]  frame={frame_meta.frame_num:5d}  "
-                f"active={len(output_stracks)}  "
-                f"lost={len(_tracker.lost_stracks)}"
-            )
-            for t in output_stracks:
-                status = "REID" if t.tracklet_len == 0 and t.is_activated else "OK"
-                print(
-                    f"      ReID={t.track_id:4d}  "
-                    f"det_idx={t.matched_det_idx:3d}  "
-                    f"tracklet_len={t.tracklet_len:3d}  "
-                    f"activated={t.is_activated}  [{status}]"
-                )
- 
+
+                if user_meta.base_meta.meta_type == pyds.NvDsMetaType.NVDSINFER_TENSOR_OUTPUT_META:
+                    tensor_meta = pyds.NvDsInferTensorMeta.cast(user_meta.user_meta_data)
+                    layer = pyds.get_nvds_LayerInfo(tensor_meta, 0)
+                    ptr = ctypes.cast(pyds.get_ptr(layer.buffer), ctypes.POINTER(ctypes.c_float))
+
+                    embed_len = 1
+                    for i in range(layer.inferDims.numDims):
+                        embed_len *= layer.inferDims.d[i]
+
+                    reid_vector = np.copy(np.ctypeslib.as_array(ptr, shape=(embed_len,)))
+
+                l_user = l_user.next
+
+            detections.append({
+                "obj_meta": l_obj.data,
+                "bbox": np.array([
+                    obj_meta.rect_params.left,
+                    obj_meta.rect_params.top,
+                    obj_meta.rect_params.width,
+                    obj_meta.rect_params.height
+                ], dtype=np.float32),
+                "det_confidence": obj_meta.confidence,
+                "reid_vector": reid_vector
+            })
+            obj_meta_list.append(obj_meta)
+
+            l_obj = l_obj.next
+
+        all_tracks= tracker.update(detections)
+        registry.step(tracker, frame_id=cur_frame)
+
+
+        # all_tracks = mct.get_tracked_objects()
+        extracted_data = []
+
+        display_meta = pyds.nvds_acquire_display_meta_from_pool(batch_meta)
+        display_meta.num_rects = len(all_tracks)
+        display_meta.num_labels = len(all_tracks) + 1
+        for i, t in enumerate(all_tracks):
+            rect_params = display_meta.rect_params[i]
+            rect_params.left = t.tlwh[0]
+            rect_params.top = t.tlwh[1]
+            rect_params.width = t.tlwh[2]
+            rect_params.height = t.tlwh[3]
+            rect_params.border_width = 1
+            rect_params.border_color.set(0.0, 1.0, 0.0, 1.0) # RGBA: Green
+            rect_params.has_bg_color = 0
+            # rect_params.bg_color.set(0.0, 1.0, 0.0, 0.3)
+
+            
+            text_params = display_meta.text_params[i]
+            text_params.display_text = f"GID: {t.t_global_id}"
+            text_params.x_offset = int(t.tlwh[0])
+            text_params.y_offset = int(t.tlwh[1])
+
+            text_params.font_params.font_name = "Serif"
+            text_params.font_params.font_size = 7
+            text_params.font_params.font_color.set(1.0, 1.0, 1.0, 1.0)
+            text_params.set_bg_clr = 1
+            text_params.text_bg_clr.set(0.0, 0.0, 0.0, 0.7)
+
+            # extracted_data.append(t.t_global_id)
+
+        # display_arr = np.array([t.t_global_id for t in tracker.tracked_stracks])
+        # # tracked_arr = np.array([t.t_global_id for t in tracker.tracked_stracks])
+        # lost_arr = np.array([t.t_global_id for t in tracker.lost_stracks])
+
+        # display_meta=pyds.nvds_acquire_display_meta_from_pool(batch_meta)
+
+
+
+
+#         display_meta.num_labels = 1
+        py_nvosd_text_params = display_meta.text_params[-1]
+        py_nvosd_text_params.display_text = \
+f"""\
+Global IDs {extracted_data}
+"""
+# Lost Stracks: {lost_arr}
+
+        py_nvosd_text_params.x_offset = 10
+        py_nvosd_text_params.y_offset = 12
+        py_nvosd_text_params.font_params.font_name = "Serif"
+        py_nvosd_text_params.font_params.font_size = 10
+        py_nvosd_text_params.font_params.font_color.set(1.0, 1.0, 1.0, 1.0)
+        py_nvosd_text_params.set_bg_clr = 1
+        py_nvosd_text_params.text_bg_clr.set(0.0, 0.0, 0.0, 1.0)
+
+
+
+
+        pyds.nvds_add_display_meta_to_frame(frame_meta, display_meta)
+
+
+        # for t in tracker.tracked_stracks:
+        #     best_idx = None
+        #     best_dist = float('inf')
+        #     for idx, det in enumerate(detections):
+        #         dist = np.linalg.norm(t.tlwh - det["bbox"])
+        #         if dist < best_dist:
+        #             best_dist = dist
+        #             best_idx = idx
+
+        #     if best_idx is not None and best_dist < 50:
+        #         obj_meta_list[best_idx].misc_obj_info[0] = t.t_global_id
+
+
+        # for t in tracker.tracked_stracks:
+        #     # best_idx = None
+        #     try:
+        #         obj_meta = pyds.NvDsObjectMeta.cast(t.curr_obj_meta_ref)
+        #         obj_meta.object_id = t.t_global_id
+        #         obj_meta.text_params.display_text = f"ReID:{t.t_global_id}"
+        #     except StopIteration:
+        #         continue
+        array_of_frames.append(detections)
+        l_frame = l_frame.next
+    if False:
+        starting_frame = array_of_frames[0]["frame_id"]
+        save_dir = "deepstream_npy_output"
+        os.makedirs(save_dir, exist_ok=True)
+        filename = os.path.join(save_dir, f"batch_frame_{starting_frame}.npy")
+        np_data = np.array(array_of_frames, dtype=object)
+        np.save(filename, np_data)
+
+    return Gst.PadProbeReturn.OK
+
+def save_dets_pad_buffer_probe(pad, info, u_data):
+    gst_buffer = info.get_buffer()
+    if not gst_buffer:
+        return Gst.PadProbeReturn.OK
+
+    batch_meta = pyds.gst_buffer_get_nvds_batch_meta(hash(gst_buffer))
+    
+    array_of_frames = []
+
+    l_frame = batch_meta.frame_meta_list
+    while l_frame is not None:
         try:
-            l_frame = l_frame.next
+            frame_meta = pyds.NvDsFrameMeta.cast(l_frame.data)
         except StopIteration:
             break
- 
+            
+        frame_dict = {
+            "frame_id": frame_meta.frame_num,
+            "sensor_id": f"platform_{frame_meta.source_id}_camera_{chr(65 + (frame_meta.pad_index % 26))}",
+            "objects": []
+        }
+
+        l_obj = frame_meta.obj_meta_list
+        while l_obj is not None:
+            try:
+                obj_meta = pyds.NvDsObjectMeta.cast(l_obj.data)
+            except StopIteration:
+                break
+
+            obj_dict = {
+                "obj_meta": None,
+                "local_track_id": obj_meta.object_id,
+                "bbox": np.array([
+                    obj_meta.rect_params.left,
+                    obj_meta.rect_params.top,
+                    obj_meta.rect_params.width,
+                    obj_meta.rect_params.height
+                ], dtype=np.float32),
+                "det_confidence": obj_meta.confidence,
+                "reid_vector": None
+            }
+
+            l_user = obj_meta.obj_user_meta_list
+            while l_user is not None:
+                try:
+                    user_meta = pyds.NvDsUserMeta.cast(l_user.data)
+                except StopIteration:
+                    break
+
+                if user_meta.base_meta.meta_type == pyds.NvDsMetaType.NVDSINFER_TENSOR_OUTPUT_META:
+                    tensor_meta = pyds.NvDsInferTensorMeta.cast(user_meta.user_meta_data)
+                    
+                    layer = pyds.get_nvds_LayerInfo(tensor_meta, 0)
+                    ptr = ctypes.cast(pyds.get_ptr(layer.buffer), ctypes.POINTER(ctypes.c_float))
+                    
+                    embed_len = 1
+                    for i in range(layer.inferDims.numDims):
+                        embed_len *= layer.inferDims.d[i]
+                        
+                    reid_array = np.ctypeslib.as_array(ptr, shape=(embed_len,))
+                    obj_dict["reid_vector"] = np.copy(reid_array)
+
+                l_user = l_user.next
+
+            frame_dict["objects"].append(obj_dict)
+            l_obj = l_obj.next
+            
+        array_of_frames.append(frame_dict)
+        l_frame = l_frame.next
+
+    # --- NEW SAVING LOGIC HERE ---
+    if array_of_frames:
+        # 1. Get the first frame number in this batch to use in the filename
+        starting_frame = array_of_frames[0]["frame_id"]
+        
+        # 2. Define your output directory and ensure it exists
+        save_dir = "/home/lab314/workspace/reid/ds_backend_reid/MCDPT/deepstream_npy_output"
+        os.makedirs(save_dir, exist_ok=True)
+        
+        # 3. Create a unique filename for this batch
+        filename = os.path.join(save_dir, f"batch_frame_{starting_frame}.npy")
+        
+        # 4. Cast the list to a NumPy object array and save
+        # dtype=object is required because the list contains dictionaries
+        np_data = np.array(array_of_frames, dtype=object)
+        np.save(filename, np_data)
+
     return Gst.PadProbeReturn.OK
 
 def main():
@@ -266,6 +408,7 @@ def main():
     streammux = Gst.ElementFactory.make("nvstreammux", "stream-muxer")
     pipeline.add(streammux)
 
+    # Parse Source List
     source_list_config = config.get('source-list', {})
     sources = []
     for key, value in source_list_config.items():
@@ -302,7 +445,6 @@ def main():
 
     pgie = Gst.ElementFactory.make("nvinfer", "primary-nvinference-engine")
     sgie1 = Gst.ElementFactory.make("nvinfer", "secondary-nvinference-engine-1")
-    nvtracker = Gst.ElementFactory.make("nvtracker", "tracker")
 
     queue1 = Gst.ElementFactory.make("queue", "queue1")
     queue2 = Gst.ElementFactory.make("queue", "queue2")
@@ -326,7 +468,7 @@ def main():
         else:
             sink = Gst.ElementFactory.make("nveglglessink", "nvvideo-renderer")
 
-    if not (pgie and sgie1 and nvdslogger and tiler and nvvidconv and nvosd and sink and nvtracker):
+    if not (pgie and sgie1 and nvdslogger and tiler and nvvidconv and nvosd and sink):
         sys.stderr.write("One element could not be created. Exiting.\n")
         return -1
 
@@ -353,9 +495,9 @@ def main():
         pgie.set_property("batch-size", num_sources)
         sgie1.set_property("batch-size", num_sources)
 
-    tracker_config = config.get('tracker', {})
-    if 'll-config-file' in tracker_config: nvtracker.set_property('ll-config-file', tracker_config['ll-config-file'])
-    if 'll-lib-file' in tracker_config: nvtracker.set_property('ll-lib-file', tracker_config['ll-lib-file'])
+    # tracker_config = config.get('tracker', {})
+    # if 'll-config-file' in tracker_config: nvtracker.set_property('ll-config-file', tracker_config['ll-config-file'])
+    # if 'll-lib-file' in tracker_config: nvtracker.set_property('ll-lib-file', tracker_config['ll-lib-file'])
 
     nvosd.set_property("display-text", 1)
     nvosd.set_property("process-mode", 1)
@@ -379,7 +521,7 @@ def main():
     bus.add_signal_watch()
     bus.connect("message", bus_call, loop)
 
-    pipeline_flow = [queue1, pgie, queue2, nvtracker, queue3, sgie1, nvdslogger, tiler, queue4, nvvidconv, queue5, nvosd, queue6, sink]
+    pipeline_flow = [queue1, pgie, queue2, queue3, sgie1, nvdslogger, tiler, queue4, nvvidconv, queue5, nvosd, queue6, sink]
 
     for x in pipeline_flow: pipeline.add(x)
     streammux.link(pipeline_flow[0])
@@ -387,7 +529,7 @@ def main():
         if i == len(pipeline_flow) - 1: break
         ds_element.link(pipeline_flow[i+1])
 
-    reid_sgie_pad = nvtracker.get_static_pad("src")
+    reid_sgie_pad = nvdslogger.get_static_pad("src")
     if not reid_sgie_pad:
         sys.stderr.write("Could not get nvdslogger src pad. Exiting.\n")
         return -1
