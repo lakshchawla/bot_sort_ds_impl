@@ -53,7 +53,7 @@ from botsort.global_registry import GlobalRegistry
 registry = GlobalRegistry(
     match_threshold=0.25,
     min_frames=5,
-    max_emb=50,
+    max_emb=5,
     emb_dim=256,
 )
 
@@ -61,7 +61,7 @@ tracker = BoTSORT(
     track_high_thresh=0.6,
     track_low_thresh=0.1,
     new_track_thresh=0.7,
-    track_buffer=600,
+    track_buffer=0,
     match_thresh=0.8,
     with_reid=True,
     proximity_thresh=0.7,

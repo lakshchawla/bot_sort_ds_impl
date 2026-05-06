@@ -239,7 +239,7 @@ class STrack(BaseTrack):
 
 class BoTSORT(object):
     def __init__(self, track_high_thresh=0.6, track_low_thresh=0.1, new_track_thresh=0.7, track_buffer=30, 
-                match_thresh=0.8, with_reid=True, proximity_thresh=0.2, appearance_thresh=0.4, euc_thresh=0.1, 
+                match_thresh=0.8, with_reid=True, proximity_thresh=0.1, appearance_thresh=0.4, euc_thresh=0.1, 
                 fuse_score=True, frame_rate=30, max_batch_size=8, map_len=None, real_data=True, registry = None):
         self.tracked_stracks = []  # type: list[STrack]
         self.lost_stracks = []  # type: list[STrack]
@@ -378,21 +378,21 @@ class BoTSORT(object):
 
         if self.with_reid:
             emb_dists = matching.embedding_distance(strack_pool, detections)
+
             valid_mask = np.logical_and(
                 emb_dists < self.appearance_thresh, 
                 ious_dists < self.proximity_thresh
             )
-            
+
             hat_emb_dists = np.ones_like(emb_dists)
             hat_emb_dists[valid_mask] = emb_dists[valid_mask]
-            # print(hat_emb_dists)
-            dists = np.minimum(ious_dists, hat_emb_dists)
-            
+            # dists = np.minimum(ious_dists, hat_emb_dists)
+            alpha = 0.4 
+            dists = alpha * ious_dists + (1 - alpha) * hat_emb_dists
         else:
             dists = ious_dists
 
         matches, u_track, u_detection = matching.linear_assignment(dists, thresh=self.match_thresh)
-    
 
         for itracked, idet in matches:
             track = strack_pool[itracked]

@@ -446,6 +446,7 @@ def main():
 
     pgie = Gst.ElementFactory.make("nvinfer", "primary-nvinference-engine")
     sgie1 = Gst.ElementFactory.make("nvinfer", "secondary-nvinference-engine-1")
+    nvtracker = Gst.ElementFactory.make("nvtracker", "tracker")
 
     queue1 = Gst.ElementFactory.make("queue", "queue1")
     queue2 = Gst.ElementFactory.make("queue", "queue2")
@@ -469,7 +470,7 @@ def main():
         else:
             sink = Gst.ElementFactory.make("nveglglessink", "nvvideo-renderer")
 
-    if not (pgie and sgie1 and nvdslogger and tiler and nvvidconv and nvosd and sink):
+    if not (pgie and sgie1 and nvdslogger and tiler and nvvidconv and nvosd and sink and nvtracker):
         sys.stderr.write("One element could not be created. Exiting.\n")
         return -1
 
@@ -496,9 +497,9 @@ def main():
         pgie.set_property("batch-size", num_sources)
         sgie1.set_property("batch-size", num_sources)
 
-    # tracker_config = config.get('tracker', {})
-    # if 'll-config-file' in tracker_config: nvtracker.set_property('ll-config-file', tracker_config['ll-config-file'])
-    # if 'll-lib-file' in tracker_config: nvtracker.set_property('ll-lib-file', tracker_config['ll-lib-file'])
+    tracker_config = config.get('tracker', {})
+    if 'll-config-file' in tracker_config: nvtracker.set_property('ll-config-file', tracker_config['ll-config-file'])
+    if 'll-lib-file' in tracker_config: nvtracker.set_property('ll-lib-file', tracker_config['ll-lib-file'])
 
     nvosd.set_property("display-text", 1)
     nvosd.set_property("process-mode", 1)
@@ -522,7 +523,7 @@ def main():
     bus.add_signal_watch()
     bus.connect("message", bus_call, loop)
 
-    pipeline_flow = [queue1, pgie, queue2, queue3, sgie1, nvdslogger, tiler, queue4, nvvidconv, queue5, nvosd, queue6, sink]
+    pipeline_flow = [queue1, pgie, queue2, nvtracker, queue3, nvdslogger, tiler, queue4, nvvidconv, queue5, nvosd, queue6, sink]
 
     for x in pipeline_flow: pipeline.add(x)
     streammux.link(pipeline_flow[0])
@@ -530,11 +531,12 @@ def main():
         if i == len(pipeline_flow) - 1: break
         ds_element.link(pipeline_flow[i+1])
 
-    reid_sgie_pad = nvdslogger.get_static_pad("src")
-    if not reid_sgie_pad:
-        sys.stderr.write("Could not get nvdslogger src pad. Exiting.\n")
-        return -1
-    reid_sgie_pad.add_probe(Gst.PadProbeType.BUFFER, reid_pad_buffer_probe, 0)
+    if False:   
+        reid_sgie_pad = nvtracker.get_static_pad("src")
+        if not reid_sgie_pad:
+            sys.stderr.write("Could not get nvdslogger src pad. Exiting.\n")
+            return -1
+        reid_sgie_pad.add_probe(Gst.PadProbeType.BUFFER, reid_pad_buffer_probe, 0)
 
     pipeline.set_state(Gst.State.PLAYING)
 
