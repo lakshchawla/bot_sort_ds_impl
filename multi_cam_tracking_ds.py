@@ -29,9 +29,10 @@ from botsort.global_registry import GlobalRegistry
 
 
 registry = GlobalRegistry(
-    match_threshold=0.25,  
-    min_frames=5,          
-    max_emb=10,            
+    match_threshold=0.25,
+    min_frames=5,
+    max_emb=50,
+    emb_dim=256,
 )
 
 tracker = BoTSORT(
@@ -41,8 +42,8 @@ tracker = BoTSORT(
     track_buffer=600,
     match_thresh=0.8,
     with_reid=True,
-    proximity_thresh=0.7,
-    appearance_thresh=0.50,
+    proximity_thresh=0.5,
+    appearance_thresh=0.2,
     euc_thresh=0.1,
     fuse_score=True,
     frame_rate=30,
@@ -228,8 +229,8 @@ def reid_pad_buffer_probe(pad, info, u_data):
             
             text_params = display_meta.text_params[i]
             text_params.display_text = f"GID: {t.t_global_id}"
-            text_params.x_offset = int(t.tlwh[0])
-            text_params.y_offset = int(t.tlwh[1])
+            text_params.x_offset = max(0, int(t.tlwh[0]))
+            text_params.y_offset = max(0, int(t.tlwh[1]))
 
             text_params.font_params.font_name = "Serif"
             text_params.font_params.font_size = 7

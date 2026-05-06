@@ -42,23 +42,21 @@ path_to_botsort_parent = './'
 if path_to_botsort_parent not in sys.path:
     sys.path.append(path_to_botsort_parent)
 
-ROOT_FRAME_DIR = "./deepstream_npy_output"
+ROOT_FRAME_DIR = "/home/lab314/workspace/reid/ds_backend_reid/MCDPT/deepstream_npy_output"
 
 from botsort.bot_sort import BoTSORT
 from multicam_tracker.clustering import Clustering, ID_Distributor
 from multicam_tracker.cluster_track import MCTracker
 
-# ── NEW: import the registry ──────────────────────────────────────────────────
 from botsort.global_registry import GlobalRegistry
 
-# --- Registry init -----------------------------------------------------------
 registry = GlobalRegistry(
-    match_threshold=0.25,   # cosine distance — tune this: lower = stricter
-    min_frames=5,           # wait 5 frames before querying (embedding stabilises)
-    max_emb=50,             # rolling buffer size per person
+    match_threshold=0.25,
+    min_frames=5,
+    max_emb=50,
+    emb_dim=256,
 )
 
-# --- Tracker init ------------------------------------------------------------
 tracker = BoTSORT(
     track_high_thresh=0.6,
     track_low_thresh=0.1,
@@ -113,10 +111,10 @@ for i in range(3000):
             extracted_data.append((t.tlwh, t.t_global_id))
 
     # ── 4. Print ──────────────────────────────────────────────────────────────
-    for x in all_tracks:
-        print(f"  track_id={x.track_id}  global_id={x.t_global_id}")
-    print(f"  registry: {registry}")
-    print()
+    # for x in all_tracks:
+    #     print(f"  track_id={x.track_id}  global_id={x.t_global_id}")
+    # print(f"  registry: {registry}")
+    # print()
 
     # ── 5. Visualise ──────────────────────────────────────────────────────────
     bg_frame = np.zeros((1080, 1920, 3), dtype=np.uint8)
@@ -125,8 +123,9 @@ for i in range(3000):
         bg_frame  = draw_boxes_on_bg(bg_frame, formatted, current_format=ACTIVE_FORMAT)
 
     cv2.imshow("Detections", bg_frame)
-    if cv2.waitKey(1) & 0xFF == ord('q'):
-        break
+    # if cv2.waitKey(1) & 0xFF == ord('q'):
+    #     break
+    cv2.waitKey(0)
 
 cv2.destroyAllWindows()
 
