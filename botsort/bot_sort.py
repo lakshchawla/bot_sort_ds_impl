@@ -375,7 +375,6 @@ class BoTSORT(object):
 
 
         ious_dists = matching.iou_distance(strack_pool, detections)
-
         if self.with_reid:
             emb_dists = matching.embedding_distance(strack_pool, detections)
 

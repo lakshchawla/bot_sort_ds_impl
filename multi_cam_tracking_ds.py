@@ -29,7 +29,7 @@ from botsort.global_registry import GlobalRegistry
 
 
 registry = GlobalRegistry(
-    match_threshold=0.25,
+    match_threshold=0.3,
     min_frames=5,
     max_emb=50,
     emb_dim=256,
@@ -50,7 +50,9 @@ tracker = BoTSORT(
     max_batch_size=8,
     map_len=None,
     real_data=True,
-    registry=registry,      
+    registry=registry,
+    # frame_width=1920,
+    # frame_height=1080,
 )
 
 clustering    = Clustering(appearance_thresh=0.75, euc_thresh=0.3, match_thresh=0.8)
@@ -190,6 +192,15 @@ def reid_pad_buffer_probe(pad, info, u_data):
 
                 l_user = l_user.next
 
+            # print(frame_meta.source_frame_width, frame_meta.source_frame_height)
+            # if (obj_meta.rect_params.left == 0 or 
+            #     obj_meta.rect_params.top == 0 or
+            #     obj_meta.rect_params.width + obj_meta.rect_params.left ==  or
+            #     obj_meta.rect_params.top + obj_meta.rect_params.height == 1080):
+            #     print("obj non det")
+            
+            is_touching_edge = obj_meta.rect_params.left <= 0 or obj_meta.rect_params.top <= 0 or obj_meta.rect_params.left + obj_meta.rect_params.width >= 1900 or obj_meta.rect_params.top + obj_meta.rect_params.height >= 1060
+
             detections.append({
                 "obj_meta": l_obj.data,
                 "bbox": np.array([
@@ -198,7 +209,7 @@ def reid_pad_buffer_probe(pad, info, u_data):
                     obj_meta.rect_params.width,
                     obj_meta.rect_params.height
                 ], dtype=np.float32),
-                "det_confidence": obj_meta.confidence,
+                "det_confidence": 0.0 if is_touching_edge else obj_meta.confidence,
                 "reid_vector": reid_vector
             })
             obj_meta_list.append(obj_meta)
@@ -446,7 +457,6 @@ def main():
 
     pgie = Gst.ElementFactory.make("nvinfer", "primary-nvinference-engine")
     sgie1 = Gst.ElementFactory.make("nvinfer", "secondary-nvinference-engine-1")
-    nvtracker = Gst.ElementFactory.make("nvtracker", "tracker")
 
     queue1 = Gst.ElementFactory.make("queue", "queue1")
     queue2 = Gst.ElementFactory.make("queue", "queue2")
@@ -470,7 +480,7 @@ def main():
         else:
             sink = Gst.ElementFactory.make("nveglglessink", "nvvideo-renderer")
 
-    if not (pgie and sgie1 and nvdslogger and tiler and nvvidconv and nvosd and sink and nvtracker):
+    if not (pgie and sgie1 and nvdslogger and tiler and nvvidconv and nvosd and sink):
         sys.stderr.write("One element could not be created. Exiting.\n")
         return -1
 
@@ -497,9 +507,9 @@ def main():
         pgie.set_property("batch-size", num_sources)
         sgie1.set_property("batch-size", num_sources)
 
-    tracker_config = config.get('tracker', {})
-    if 'll-config-file' in tracker_config: nvtracker.set_property('ll-config-file', tracker_config['ll-config-file'])
-    if 'll-lib-file' in tracker_config: nvtracker.set_property('ll-lib-file', tracker_config['ll-lib-file'])
+    # tracker_config = config.get('tracker', {})
+    # if 'll-config-file' in tracker_config: nvtracker.set_property('ll-config-file', tracker_config['ll-config-file'])
+    # if 'll-lib-file' in tracker_config: nvtracker.set_property('ll-lib-file', tracker_config['ll-lib-file'])
 
     nvosd.set_property("display-text", 1)
     nvosd.set_property("process-mode", 1)
@@ -523,7 +533,7 @@ def main():
     bus.add_signal_watch()
     bus.connect("message", bus_call, loop)
 
-    pipeline_flow = [queue1, pgie, queue2, nvtracker, queue3, nvdslogger, tiler, queue4, nvvidconv, queue5, nvosd, queue6, sink]
+    pipeline_flow = [queue1, pgie, queue2, queue3, sgie1, nvdslogger, tiler, queue4, nvvidconv, queue5, nvosd, queue6, sink]
 
     for x in pipeline_flow: pipeline.add(x)
     streammux.link(pipeline_flow[0])
@@ -531,12 +541,11 @@ def main():
         if i == len(pipeline_flow) - 1: break
         ds_element.link(pipeline_flow[i+1])
 
-    if False:   
-        reid_sgie_pad = nvtracker.get_static_pad("src")
-        if not reid_sgie_pad:
-            sys.stderr.write("Could not get nvdslogger src pad. Exiting.\n")
-            return -1
-        reid_sgie_pad.add_probe(Gst.PadProbeType.BUFFER, reid_pad_buffer_probe, 0)
+    reid_sgie_pad = nvdslogger.get_static_pad("src")
+    if not reid_sgie_pad:
+        sys.stderr.write("Could not get nvdslogger src pad. Exiting.\n")
+        return -1
+    reid_sgie_pad.add_probe(Gst.PadProbeType.BUFFER, reid_pad_buffer_probe, 0)
 
     pipeline.set_state(Gst.State.PLAYING)
 
