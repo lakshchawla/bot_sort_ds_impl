@@ -32,7 +32,7 @@ registry = GlobalRegistry(
     match_threshold=0.3,
     min_frames=5,
     max_emb=50,
-    emb_dim=256,
+    emb_dim=256,    
 )
 
 tracker = BoTSORT(
@@ -138,7 +138,10 @@ def create_source_bin(index, uri):
 
     return nbin
 
+import nvtx
 
+
+@nvtx.annotate("reid_probe", color="blue")
 def reid_pad_buffer_probe(pad, info, u_data):
     gst_buffer = info.get_buffer()
     if not gst_buffer:
@@ -158,6 +161,7 @@ def reid_pad_buffer_probe(pad, info, u_data):
         detections = []
         obj_meta_list = []  # parallel list to detections, same index order
 
+        nvtx.push_range("build_detections", color="green")
         l_obj = frame_meta.obj_meta_list
         while l_obj is not None:
             try:
@@ -172,6 +176,7 @@ def reid_pad_buffer_probe(pad, info, u_data):
             obj_meta.text_params.display_text = ""
             reid_vector = None
 
+            nvtx.push_range("reid_extract", color="yellow")
             l_user = obj_meta.obj_user_meta_list
             while l_user is not None:
                 try:
@@ -191,6 +196,7 @@ def reid_pad_buffer_probe(pad, info, u_data):
                     reid_vector = np.copy(np.ctypeslib.as_array(ptr, shape=(embed_len,)))
 
                 l_user = l_user.next
+            nvtx.pop_range()  # reid_extract
 
             # print(frame_meta.source_frame_width, frame_meta.source_frame_height)
             # if (obj_meta.rect_params.left == 0 or 
@@ -215,59 +221,65 @@ def reid_pad_buffer_probe(pad, info, u_data):
             obj_meta_list.append(obj_meta)
 
             l_obj = l_obj.next
+        nvtx.pop_range()  # build_detections
 
-        all_tracks= tracker.update(detections)
-        registry.step(tracker, frame_id=cur_frame)
+        with nvtx.annotate("tracker_update", color="red"):
+            all_tracks= tracker.update(detections)
+        with nvtx.annotate("registry_step", color="purple"):
+            registry.step(tracker, frame_id=cur_frame)
 
 
         # all_tracks = mct.get_tracked_objects()
+        nvtx.push_range("build_display_meta", color="cyan")
+       
         extracted_data = []
 
+        MAX_DISPLAY_SLOTS = 16  # MAX_ELEMENTS_IN_DISPLAY_META
         display_meta = pyds.nvds_acquire_display_meta_from_pool(batch_meta)
-        display_meta.num_rects = len(all_tracks)
-        display_meta.num_labels = len(all_tracks) + 1
-        for i, t in enumerate(all_tracks):
-            rect_params = display_meta.rect_params[i]
+        slot = 0
+
+        for t in all_tracks:
+            if slot >= MAX_DISPLAY_SLOTS:
+                display_meta.num_rects = MAX_DISPLAY_SLOTS
+                display_meta.num_labels = MAX_DISPLAY_SLOTS
+                pyds.nvds_add_display_meta_to_frame(frame_meta, display_meta)
+                display_meta = pyds.nvds_acquire_display_meta_from_pool(batch_meta)
+                slot = 0
+
+            rect_params = display_meta.rect_params[slot]
             rect_params.left = t.tlwh[0]
             rect_params.top = t.tlwh[1]
             rect_params.width = t.tlwh[2]
             rect_params.height = t.tlwh[3]
             rect_params.border_width = 1
-            rect_params.border_color.set(0.0, 1.0, 0.0, 1.0) # RGBA: Green
+            rect_params.border_color.set(0.0, 1.0, 0.0, 1.0)
             rect_params.has_bg_color = 0
-            # rect_params.bg_color.set(0.0, 1.0, 0.0, 0.3)
 
-            
-            text_params = display_meta.text_params[i]
+            text_params = display_meta.text_params[slot]
             text_params.display_text = f"GID: {t.t_global_id}"
             text_params.x_offset = max(0, int(t.tlwh[0]))
             text_params.y_offset = max(0, int(t.tlwh[1]))
-
             text_params.font_params.font_name = "Serif"
             text_params.font_params.font_size = 7
             text_params.font_params.font_color.set(1.0, 1.0, 1.0, 1.0)
             text_params.set_bg_clr = 1
             text_params.text_bg_clr.set(0.0, 0.0, 0.0, 0.7)
 
-            # extracted_data.append(t.t_global_id)
+            slot += 1
 
-        # display_arr = np.array([t.t_global_id for t in tracker.tracked_stracks])
-        # # tracked_arr = np.array([t.t_global_id for t in tracker.tracked_stracks])
-        # lost_arr = np.array([t.t_global_id for t in tracker.lost_stracks])
+        # Summary label needs one extra label slot; acquire a new display_meta if full
+        if slot >= MAX_DISPLAY_SLOTS:
+            display_meta.num_rects = MAX_DISPLAY_SLOTS
+            display_meta.num_labels = MAX_DISPLAY_SLOTS
+            pyds.nvds_add_display_meta_to_frame(frame_meta, display_meta)
+            display_meta = pyds.nvds_acquire_display_meta_from_pool(batch_meta)
+            slot = 0
 
-        # display_meta=pyds.nvds_acquire_display_meta_from_pool(batch_meta)
+        display_meta.num_rects = slot
+        display_meta.num_labels = slot + 1
 
-
-
-
-#         display_meta.num_labels = 1
-        py_nvosd_text_params = display_meta.text_params[-1]
-        py_nvosd_text_params.display_text = \
-f"""\
-Global IDs {extracted_data}
-"""
-# Lost Stracks: {lost_arr}
-
+        py_nvosd_text_params = display_meta.text_params[slot]
+        py_nvosd_text_params.display_text = f"Global IDs {extracted_data}"
         py_nvosd_text_params.x_offset = 10
         py_nvosd_text_params.y_offset = 12
         py_nvosd_text_params.font_params.font_name = "Serif"
@@ -276,10 +288,8 @@ Global IDs {extracted_data}
         py_nvosd_text_params.set_bg_clr = 1
         py_nvosd_text_params.text_bg_clr.set(0.0, 0.0, 0.0, 1.0)
 
-
-
-
         pyds.nvds_add_display_meta_to_frame(frame_meta, display_meta)
+        nvtx.pop_range()  # build_display_meta
 
 
         # for t in tracker.tracked_stracks:
@@ -309,7 +319,7 @@ Global IDs {extracted_data}
         starting_frame = array_of_frames[0]["frame_id"]
         save_dir = "deepstream_npy_output"
         os.makedirs(save_dir, exist_ok=True)
-        filename = os.path.join(save_dir, f"batch_frame_{starting_frame}.npy")
+        filename = os.path.join(save_dir, f"batch_frame_{startig_frame}.npy")
         np_data = np.array(array_of_frames, dtype=object)
         np.save(filename, np_data)
 
@@ -407,7 +417,7 @@ def save_dets_pad_buffer_probe(pad, info, u_data):
 def main():
     Gst.init(None)
 
-    yaml_file = "/home/lab314/workspace/reid/ds_backend_reid/MCDPT/ds_include/app_config.yml"
+    yaml_file = "ds_include/app_config.yml"
     with open(yaml_file, 'r') as stream:
         try:
             config = yaml.safe_load(stream)
@@ -541,11 +551,13 @@ def main():
         if i == len(pipeline_flow) - 1: break
         ds_element.link(pipeline_flow[i+1])
 
-    reid_sgie_pad = nvdslogger.get_static_pad("src")
-    if not reid_sgie_pad:
-        sys.stderr.write("Could not get nvdslogger src pad. Exiting.\n")
-        return -1
-    reid_sgie_pad.add_probe(Gst.PadProbeType.BUFFER, reid_pad_buffer_probe, 0)
+
+    if True:
+        reid_sgie_pad = nvdslogger.get_static_pad("src")
+        if not reid_sgie_pad:
+            sys.stderr.write("Could not get nvdslogger src pad. Exiting.\n")
+            return -1
+        reid_sgie_pad.add_probe(Gst.PadProbeType.BUFFER, reid_pad_buffer_probe, 0)
 
     pipeline.set_state(Gst.State.PLAYING)
 
