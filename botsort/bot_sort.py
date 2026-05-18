@@ -504,10 +504,10 @@ class BoTSORT(object):
         output_stracks = [track for track in self.tracked_stracks]
         
         disp_curr = np.array([t.t_global_id for t in activated_starcks])
-        # print(f"[CURR] {disp_curr}")
+        print(f"[CURR] {disp_curr}")
         
         disp_lost = np.array([t.t_global_id for t in self.lost_stracks])
-        # print(f"[LOST] {disp_lost}")
+        print(f"[LOST] {disp_lost}")
         
         if not len(unconfirmed): 
             disp_uncm = np.array([t.t_global_id for t in activated_starcks])

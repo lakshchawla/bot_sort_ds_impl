@@ -239,11 +239,11 @@ class GlobalRegistry:
             best_entry, best_dist = self.query(feat)
 
             if best_entry is not None:
-                print(
-                    f"[REGISTRY] Re-entry detected: "
-                    f"track_id={tid} → global_id={best_entry.global_id} "
-                    f"(cos_dist={best_dist:.3f})"
-                )
+                # print(
+                #     f"[REGISTRY] Re-entry detected: "
+                #     f"track_id={tid} → global_id={best_entry.global_id} "
+                #     f"(cos_dist={best_dist:.3f})"
+                # )
                 self._link_existing(best_entry, tid)
                 best_entry.add_embedding(feat, frame_id, bbox)
                 track.t_global_id = best_entry.global_id

@@ -1,28 +1,29 @@
 source-list:
-   list: file:///home/lab314/Downloads/output_h264_trim.mp4;
-  #  list: file:///home/lab314/Videos/video_cut_reid.mp4;
+  #  list: file:///home/lab314/Downloads/output_h264_trim.mp4;
+   list: file:///home/lab314/Videos/video_cut_reid.mp4;file:///home/lab314/Videos/video_cut_reid.mp4;
   #  list: file:///home/lab314/Videos/video_cut.mp4;
 
 streammux:
-  batch-size: 1
+  batch-size: 2
   width: 1920
   height: 1080
 
 tiler:
-  width: 896
-  # width: 1792
+  # width: 896
+  width: 1792
   height: 504
+
 
 sink:
   qos: 0
 
 primary-gie:  
   plugin-type: 0  
-  config-file-path: /home/lab314/workspace/reid/ds_backend_reid/MCDPT/ds_include/dstest3_pgie_config.yml
+  config-file-path: /home/lab314/workspace/reid/bot_sort_ds_impl/ds_include/dstest3_pgie_config.yml
 
 secondary-gie-1:
   plugin-type: 0
-  config-file-path: /home/lab314/workspace/reid/ds_backend_reid/MCDPT/ds_include/sgie_config.yml
+  config-file-path: /home/lab314/workspace/reid/bot_sort_ds_impl/ds_include/sgie_config.yml
 
 tracker:
   enable: 0
