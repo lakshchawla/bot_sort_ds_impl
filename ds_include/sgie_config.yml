@@ -3,8 +3,8 @@ property:
   net-scale-factor: 0.01735207357279195
   offsets: 123.675;116.28;103.53
   model-color-format: 0
-  onnx-file: /home/lab314/workspace/yolo_ds/models/resnet50_market1501_aicity156.onnx
-  model-engine-file: /home/lab314/workspace/yolo_ds/models/resnet50_market1501_aicity156.onnx_b100_gpu0_fp16.engine
+  onnx-file: /opt/nvidia/deepstream/deepstream/samples/models/reid/resnet50_market1501_aicity156.onnx
+  model-engine-file: /opt/nvidia/deepstream/deepstream/samples/models/reid/resnet50_market1501_aicity156.onnx_b100_gpu0_fp16.engine
   infer-dims: 3;256;128
   batch-size: 100
   network-mode: 2
