@@ -1,17 +1,14 @@
 source-list:
   #  list: file:///home/lab314/Downloads/output_h264_trim.mp4;
-   list: file:///home/lab314/Videos/video_cut_reid.mp4;file:///home/lab314/Videos/video_cut_reid.mp4;
+  #  list: rtsp://admin:123456@192.168.3.123/stream0;
+  list: rtsp://root:root@192.168.6.91/cam1/h264;
+  # list: v4l2:///dev/video2
   #  list: file:///home/lab314/Videos/video_cut.mp4;
 
-streammux:
-  batch-size: 2
-  width: 1920
-  height: 1080
-
 tiler:
-  # width: 896
-  width: 1792
-  height: 504
+  width: 1920
+  # width: 1792
+  height: 1080
 
 
 sink:
@@ -25,16 +22,15 @@ secondary-gie-1:
   plugin-type: 0
   config-file-path: /home/lab314/workspace/reid/bot_sort_ds_impl/ds_include/sgie_config.yml
 
-tracker:
-  enable: 0
-  tracker-width: 960
-  tracker-height: 544
-  gpu-id: 0
-  display-tracking-id: 0
-  ll-lib-file: /opt/nvidia/deepstream/deepstream/lib/libnvds_nvmultiobjecttracker.so
-  ll-config-file: /opt/nvidia/deepstream/deepstream/samples/configs/deepstream-app/config_tracker_NvDCF_max_perf.yml
+# tracker:
+#   enable: 0
+#   tracker-width: 960
+#   tracker-height: 544
+#   gpu-id: 0
+#   display-tracking-id: 0
+#   ll-lib-file: /opt/nvidia/deepstream/deepstream/lib/libnvds_nvmultiobjecttracker.so
+#   ll-config-file: /opt/nvidia/deepstream/deepstream/samples/configs/deepstream-app/config_tracker_NvDCF_max_perf.yml
 
 osd:
   process-mode: 0
   display-text: 0
-  

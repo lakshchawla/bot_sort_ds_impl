@@ -4,12 +4,12 @@ property:
   offsets: 123.675;116.28;103.53
   model-color-format: 0
   onnx-file: /opt/nvidia/deepstream/deepstream/samples/models/reid/resnet50_market1501_aicity156.onnx
-  model-engine-file: /opt/nvidia/deepstream/deepstream/samples/models/reid/resnet50_market1501_aicity156.onnx_b100_gpu0_fp16.engine
+  model-engine-file: /opt/nvidia/deepstream/deepstream/samples/models/reid/resnet50_market1501_aicity156.onnx_b50_gpu0_fp16.engine
   infer-dims: 3;256;128
-  batch-size: 100
+  batch-size: 50
   network-mode: 2
   network-type: 100
-  interval: 0
+  interval: 10
   process-mode: 2
   # cluster-mode: 3
   classifier-threshold: 0

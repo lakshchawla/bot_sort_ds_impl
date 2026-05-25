@@ -91,7 +91,7 @@ class GlobalRegistry:
 
         self._entries:       list[GalleryEntry] = []
         self._tid_to_gid:    dict[int, int]     = {}   
-        self._global_id_ctr: int                = 0
+        # self._global_id_ctr: int                = 0
 
         self._emb_dim   = emb_dim        
         self._index_cpu = faiss.IndexFlatIP(emb_dim)   
@@ -209,18 +209,23 @@ class GlobalRegistry:
             entry.active_tid = None
 
 
-    def step(self, tracker, frame_id: int):
-        current_tids = {t.track_id for t in tracker.tracked_stracks}
+    def step(self, tracker, frame_id: int, tid_offset: int = 0, tid_range: int = 100_000):
+        current_tids = {t.track_id + tid_offset for t in tracker.tracked_stracks}
 
-        linked_tids = set(self._tid_to_gid.keys())
-        for gone_tid in linked_tids - current_tids:
+        # Only consider tids that belong to this camera's range so that a
+        # second call (camera 2) does not deactivate camera 1's linked tracks.
+        cam_linked_tids = {t for t in self._tid_to_gid
+                           if tid_offset <= t < tid_offset + tid_range}
+        for gone_tid in cam_linked_tids - current_tids:
             self.deactivate_track(gone_tid)
 
         for track in tracker.tracked_stracks:
-            tid  = track.track_id
-            feat = track.smooth_feat   
+            tid  = track.track_id + tid_offset
+            feat = track.smooth_feat
             bbox = track.tlwh
 
+
+            # if global id is already assigned to a tracklet, still need to use the bot_sort tracklet
             if track.t_global_id != 0:
                 gid = track.t_global_id
                 entry = self._get_entry_by_gid(gid)
@@ -229,7 +234,7 @@ class GlobalRegistry:
                 continue
 
             if track.tracklet_len < self.min_frames:
-                continue   
+                continue
 
             if feat is None:
                 gid = self._register_new(tid, np.zeros(self._emb_dim, dtype=np.float32), frame_id, bbox)
@@ -239,14 +244,21 @@ class GlobalRegistry:
             best_entry, best_dist = self.query(feat)
 
             if best_entry is not None:
-                # print(
-                #     f"[REGISTRY] Re-entry detected: "
-                #     f"track_id={tid} → global_id={best_entry.global_id} "
-                #     f"(cos_dist={best_dist:.3f})"
-                # )
-                self._link_existing(best_entry, tid)
-                best_entry.add_embedding(feat, frame_id, bbox)
-                track.t_global_id = best_entry.global_id
+                # Guard: if the matched entry is already occupied by a live
+                # track, do NOT steal the global_id — that would give two
+                # active tracks the same identity.  Register a fresh entry.
+                if best_entry.active_tid is not None and best_entry.active_tid in self._tid_to_gid:
+                    gid = self._register_new(tid, feat, frame_id, bbox)
+                    track.t_global_id = gid
+                    print(
+                        f"[REGISTRY] Occupied entry blocked: "
+                        f"track_id={tid} → new global_id={gid} "
+                        f"(matched gid={best_entry.global_id} already held by tid={best_entry.active_tid})"
+                    )
+                else:
+                    self._link_existing(best_entry, tid)
+                    best_entry.add_embedding(feat, frame_id, bbox)
+                    track.t_global_id = best_entry.global_id
             else:
                 gid = self._register_new(tid, feat, frame_id, bbox)
                 track.t_global_id = gid
