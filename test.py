@@ -51,7 +51,7 @@ path_to_botsort_parent = './'
 if path_to_botsort_parent not in sys.path:
     sys.path.append(path_to_botsort_parent)
 
-ROOT_FRAME_DIR = "/home/lab314/workspace/reid/ds_backend_reid/MCDPT/deepstream_npy_output"
+ROOT_FRAME_DIR = "/home/lakshh/deepstream_npy_output"
 # ROOT_FRAME_DIR = "/home/lab314/workspace/reid/ds_backend_reid/MCDPT/deepstream_npy_output"
 
 from botsort.bot_sort import BoTSORT
@@ -125,8 +125,7 @@ for i in range(3000):
     tracker2.update(detections2)
 
     # ── 2. Global registry step — assigns/reuses t_global_id on each track ───
-    registry.step(tracker1, frame_id=cur_frame, tid_offset=CAM1_TID_OFFSET)
-    registry.step(tracker2, frame_id=cur_frame, tid_offset=CAM2_TID_OFFSET)
+    registry.step([tracker1, tracker2], frame_id=cur_frame)
 
     # ── 3. Collect tracks from both cameras for display ───────────────────────
     extracted_data1 = []

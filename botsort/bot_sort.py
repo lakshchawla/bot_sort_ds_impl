@@ -344,7 +344,6 @@ class BoTSORT(object):
             new_ratio = None
             detections = []
 
-        ''' Add newly detected tracklets to tracked_stracks'''
         unconfirmed = []
         tracked_stracks = []  # type: list[STrack]
         for track in self.tracked_stracks:
@@ -353,26 +352,9 @@ class BoTSORT(object):
             else:
                 tracked_stracks.append(track)
 
-        ''' Step 2: First association, with high score detection boxes'''
         strack_pool = joint_stracks(tracked_stracks, self.lost_stracks)
 
-        # Predict the current location with KF
         STrack.multi_predict(strack_pool)
-
-        # Fix camera motion
-        # warp = self.gmc.apply(img, dets)
-        # STrack.multi_gmc(strack_pool, warp)
-        # STrack.multi_gmc(unconfirmed, warp)
-
-        # Associate with high score detection boxes
-
-        # if self.fuse_score:
-            # ious_dists = matching.fuse_score(ious_dists, detections)
-        
-        # centroid_dists = matching.centroid_distance(strack_pool, detections)
-        # centroid_dists /= self.max_len
-        # centroid_dists_mask = (centroid_dists > self.proximity_thresh)
-
 
         ious_dists = matching.iou_distance(strack_pool, detections)
         if self.with_reid:
@@ -485,9 +467,6 @@ class BoTSORT(object):
             if self.frame_id - track.end_frame > self.max_time_lost:
                 track.mark_removed()
                 removed_stracks.append(track)
-                # ← ADD THESE 2 LINES:
-                if self.registry is not None:
-                    self.registry.deactivate_track(track.track_id)
 
         """ Merge """
         self.tracked_stracks = [t for t in self.tracked_stracks if t.state == TrackState.Tracked]

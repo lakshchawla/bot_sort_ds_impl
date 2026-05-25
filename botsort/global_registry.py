@@ -35,21 +35,24 @@ import faiss
 class GalleryEntry:
     def __init__(
         self,
-        global_id:  int,
-        feat:       np.ndarray,
-        track_id:   int,
-        frame_id:   int,
-        bbox:       np.ndarray,
-        max_emb:    int = 50,
+        global_id:     int,
+        feat:          np.ndarray,
+        track_id:      int,
+        frame_id:      int,
+        bbox:          np.ndarray,
+        max_emb:       int = 50,
+        birth_cam_idx: int = 0,
     ):
-        self.global_id  = global_id
-        self.active_tid = track_id        
-        self.last_frame = frame_id
-        self.last_bbox  = bbox.copy()
+        self.global_id     = global_id
+        self.active_tid    = track_id
+        self.last_frame    = frame_id
+        self.last_bbox     = bbox.copy()
+        self.birth_cam_idx = birth_cam_idx
+        self.current_cam   = birth_cam_idx
 
         self.embeddings: deque = deque(maxlen=max_emb)
         self.embeddings.append(feat)
-        self.centroid = feat.copy()       
+        self.centroid = feat.copy()
 
     def _recompute_centroid(self):
         c = np.mean(self.embeddings, axis=0).astype(np.float32)
@@ -74,6 +77,7 @@ class GalleryEntry:
     def __repr__(self):
         return (f"GalleryEntry(gid={self.global_id}, "
                 f"tid={self.active_tid}, "
+                f"birth_cam={self.birth_cam_idx}, cur_cam={self.current_cam}, "
                 f"n_emb={len(self.embeddings)}, "
                 f"last_frame={self.last_frame})")
 
@@ -90,8 +94,9 @@ class GlobalRegistry:
         self.max_emb         = max_emb
 
         self._entries:       list[GalleryEntry] = []
-        self._tid_to_gid:    dict[int, int]     = {}   
-        self._global_id_ctr: int                = 0
+        self._tid_to_gid:    dict[int, int]     = {}
+        self._cam_id_ctrs:   dict[int, int]     = {}  # cam_idx → per-cam counter
+        self._dirty:         bool               = False
 
         self._emb_dim   = emb_dim        
         self._index_cpu = faiss.IndexFlatIP(emb_dim)   
@@ -102,9 +107,9 @@ class GlobalRegistry:
         self._faiss_pos_to_gid: list[int] = []
         self._gid_to_entry: dict[int, GalleryEntry] = {}
 
-    def _new_global_id(self) -> int:
-        self._global_id_ctr += 1
-        return self._global_id_ctr
+    def _new_global_id(self, birth_cam_idx: int) -> int:
+        self._cam_id_ctrs[birth_cam_idx] = self._cam_id_ctrs.get(birth_cam_idx, 0) + 1
+        return (birth_cam_idx + 1) * 1_000 + self._cam_id_ctrs[birth_cam_idx]
 
     def query(self, feat: np.ndarray) -> tuple[Optional[GalleryEntry], float]:
         if self._index.ntotal == 0 or feat is None:
@@ -175,11 +180,12 @@ class GlobalRegistry:
 
         return results
 
-    def _register_new(self, track_id, feat, frame_id, bbox):
-        gid = self._new_global_id()
+    def _register_new(self, track_id, feat, frame_id, bbox, birth_cam_idx: int = 0):
+        gid = self._new_global_id(birth_cam_idx)
         entry = GalleryEntry(
             global_id=gid, feat=feat, track_id=track_id,
             frame_id=frame_id, bbox=bbox, max_emb=self.max_emb,
+            birth_cam_idx=birth_cam_idx,
         )
         self._entries.append(entry)
         self._gid_to_entry[gid] = entry
@@ -209,67 +215,105 @@ class GlobalRegistry:
             entry.active_tid = None
 
 
-    def step(self, tracker, frame_id: int, tid_offset: int = 0, tid_range: int = 100_000):
-        current_tids = {t.track_id + tid_offset for t in tracker.tracked_stracks}
+    def step(self, trackers, frame_id: int):
+        """Process one frame across all cameras.
 
-        # Only consider tids that belong to this camera's range so that a
-        # second call (camera 2) does not deactivate camera 1's linked tracks.
-        cam_linked_tids = {t for t in self._tid_to_gid
-                           if tid_offset <= t < tid_offset + tid_range}
-        for gone_tid in cam_linked_tids - current_tids:
-            self.deactivate_track(gone_tid)
+        trackers: a single BoTSORT instance or a list of them.
+                  List position is used as cam_idx (0-based).
 
-        for track in tracker.tracked_stracks:
-            tid  = track.track_id + tid_offset
-            feat = track.smooth_feat
-            bbox = track.tlwh
+        Global ID encoding: person_counter * 1000 + birth_cam_idx.
+          e.g. the 4th registered person first seen on cam 1 → 4001.
+        Internal cam_tid keys: cam_idx * 100_000 + track.track_id,
+          giving each camera a private range of 100k track IDs.
+        """
+        if not isinstance(trackers, list):
+            trackers = [trackers]
 
+        # --- Deactivate tracks that left tracked_stracks (lost or removed) ---
+        for cam_idx, tracker in enumerate(trackers):
+            cam_base         = cam_idx * 100_000
+            current_cam_tids = {cam_base + t.track_id for t in tracker.tracked_stracks}
+            cam_linked       = {t for t in self._tid_to_gid
+                                if cam_base <= t < cam_base + 100_000}
+            for gone_tid in cam_linked - current_cam_tids:
+                self.deactivate_track(gone_tid)
 
-            # if global id is already assigned to a tracklet, still need to
-            if track.t_global_id != 0:
-                gid = track.t_global_id
-                entry = self._get_entry_by_gid(gid)
-                if entry is not None and feat is not None:
-                    entry.add_embedding(feat, frame_id, bbox)
-                continue
+        # --- Update / assign global IDs across all cameras (panoramic pool) ---
+        for cam_idx, tracker in enumerate(trackers):
+            cam_base = cam_idx * 100_000
+            for track in tracker.tracked_stracks:
+                cam_tid = cam_base + track.track_id
+                feat    = track.curr_feat
+                bbox    = track.tlwh
 
-            if track.tracklet_len < self.min_frames:
-                continue
+                if track.t_global_id != 0:
+                    gid   = track.t_global_id
+                    entry = self._get_entry_by_gid(gid)
+                    if entry is not None:
+                        # Re-link if deactivated and re-activated (BoT-SORT lost→tracked)
+                        if entry.active_tid != cam_tid:
+                            if entry.active_tid is not None and entry.active_tid in self._tid_to_gid:
+                                del self._tid_to_gid[entry.active_tid]
+                            entry.active_tid = cam_tid
+                            self._tid_to_gid[cam_tid] = gid
+                        # Detect and log camera boundary crossings
+                        if entry.current_cam != cam_idx:
+                            print(
+                                f"[REGISTRY] Camera shift: global_id={gid} "
+                                f"cam {entry.current_cam} → {cam_idx}"
+                            )
+                            entry.current_cam = cam_idx
+                        if feat is not None:
+                            entry.add_embedding(feat, frame_id, bbox)
+                            self._dirty = True
+                    continue
 
-            if feat is None:
-                gid = self._register_new(tid, np.zeros(self._emb_dim, dtype=np.float32), frame_id, bbox)
-                track.t_global_id = gid
-                continue
+                if track.tracklet_len < self.min_frames:
+                    continue
 
-            best_entry, best_dist = self.query(feat)
+                if feat is None:
+                    gid = self._register_new(
+                        cam_tid, np.zeros(self._emb_dim, dtype=np.float32),
+                        frame_id, bbox, birth_cam_idx=cam_idx,
+                    )
+                    track.t_global_id = gid
+                    continue
 
-            if best_entry is not None:
-                # Guard: if the matched entry is already occupied by a live
-                # track, do NOT steal the global_id — that would give two
-                # active tracks the same identity.  Register a fresh entry.
-                if best_entry.active_tid is not None and best_entry.active_tid in self._tid_to_gid:
-                    gid = self._register_new(tid, feat, frame_id, bbox)
+                best_entry, best_dist = self.query(feat)
+
+                if best_entry is not None:
+                    # Guard: do not steal an identity held by another live track.
+                    if best_entry.active_tid is not None and best_entry.active_tid in self._tid_to_gid:
+                        gid = self._register_new(cam_tid, feat, frame_id, bbox, birth_cam_idx=cam_idx)
+                        track.t_global_id = gid
+                        print(
+                            f"[REGISTRY] Occupied entry blocked: "
+                            f"cam_tid={cam_tid} → new global_id={gid} "
+                            f"(matched gid={best_entry.global_id} already held by tid={best_entry.active_tid})"
+                        )
+                    else:
+                        self._link_existing(best_entry, cam_tid)
+                        if best_entry.current_cam != cam_idx:
+                            print(
+                                f"[REGISTRY] Camera shift on re-ID: global_id={best_entry.global_id} "
+                                f"cam {best_entry.current_cam} → {cam_idx}"
+                            )
+                            best_entry.current_cam = cam_idx
+                        best_entry.add_embedding(feat, frame_id, bbox)
+                        self._dirty = True
+                        track.t_global_id = best_entry.global_id
+                else:
+                    gid = self._register_new(cam_tid, feat, frame_id, bbox, birth_cam_idx=cam_idx)
                     track.t_global_id = gid
                     print(
-                        f"[REGISTRY] Occupied entry blocked: "
-                        f"track_id={tid} → new global_id={gid} "
-                        f"(matched gid={best_entry.global_id} already held by tid={best_entry.active_tid})"
+                        f"[REGISTRY] New entry: "
+                        f"cam_tid={cam_tid} → global_id={gid} "
+                        f"(closest_dist={best_dist:.3f})"
                     )
-                else:
-                    self._link_existing(best_entry, tid)
-                    best_entry.add_embedding(feat, frame_id, bbox)
-                    track.t_global_id = best_entry.global_id
-            else:
-                gid = self._register_new(tid, feat, frame_id, bbox)
-                track.t_global_id = gid
-                print(
-                    f"[REGISTRY] New entry: "
-                    f"track_id={tid} → global_id={gid} "
-                    f"(closest_dist={best_dist:.3f})"
-                )
-        
-        if any(t.t_global_id != 0 for t in tracker.tracked_stracks):
+
+        if self._dirty:
             self._rebuild_faiss_index()
+            self._dirty = False
 
     def _rebuild_faiss_index(self):
         if not self._entries:

@@ -23,8 +23,6 @@ if path_to_botsort_parent not in sys.path:
     sys.path.append(path_to_botsort_parent)
  
 from botsort.bot_sort import BoTSORT
-from multicam_tracker.clustering import Clustering, ID_Distributor
-from multicam_tracker.cluster_track import MCTracker
 from botsort.global_registry import GlobalRegistry
 
 
@@ -54,8 +52,6 @@ tracker = BoTSORT(
     # frame_width=1920,
     # frame_height=1080,
 )
-
-scene         = 'scene_061' 
 
 PERF_MODE = os.environ.get("NVDS_TEST3_PERF_MODE") == "1"
 cur_frame  = 0
