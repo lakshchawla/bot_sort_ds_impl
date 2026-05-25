@@ -31,8 +31,8 @@ class STrack(BaseTrack):
         self.is_activated = False
 
         self.score = score
-        self.tracklet_len = 0
 
+        self.tracklet_len = 0
         self.smooth_feat = None
         self.curr_feat = None
         self.pose = pose

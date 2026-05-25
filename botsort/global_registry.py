@@ -91,7 +91,7 @@ class GlobalRegistry:
 
         self._entries:       list[GalleryEntry] = []
         self._tid_to_gid:    dict[int, int]     = {}   
-        # self._global_id_ctr: int                = 0
+        self._global_id_ctr: int                = 0
 
         self._emb_dim   = emb_dim        
         self._index_cpu = faiss.IndexFlatIP(emb_dim)   
@@ -225,7 +225,7 @@ class GlobalRegistry:
             bbox = track.tlwh
 
 
-            # if global id is already assigned to a tracklet, still need to use the bot_sort tracklet
+            # if global id is already assigned to a tracklet, still need to
             if track.t_global_id != 0:
                 gid = track.t_global_id
                 entry = self._get_entry_by_gid(gid)
