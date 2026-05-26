@@ -14,6 +14,7 @@ import numpy as np
 import time
 import threading
 from collections import defaultdict
+import nvtx
 
 from glob import glob
 
@@ -30,10 +31,10 @@ registry = GlobalRegistry(
     match_threshold=0.3,
     min_frames=5,
     max_emb=50,
-    emb_dim=256,    
+    emb_dim=256,
 )
 
-tracker = BoTSORT(
+_tracker_kwargs = dict(
     track_high_thresh=0.6,
     track_low_thresh=0.1,
     new_track_thresh=0.3,
@@ -49,11 +50,14 @@ tracker = BoTSORT(
     map_len=None,
     real_data=True,
     registry=registry,
-    # frame_width=1920,
-    # frame_height=1080,
 )
 
+tracker0 = BoTSORT(**_tracker_kwargs)  # camera source_id 0
+tracker1 = BoTSORT(**_tracker_kwargs)  # camera source_id 1
+trackers = [tracker0, tracker1]
+
 PERF_MODE = os.environ.get("NVDS_TEST3_PERF_MODE") == "1"
+
 cur_frame  = 0
 ACTIVE_FORMAT = "tlwh"
 
@@ -123,9 +127,6 @@ def create_source_bin(index, uri):
 
     return nbin
 
-import nvtx
-
-
 @nvtx.annotate("reid_probe", color="blue")
 def reid_pad_buffer_probe(pad, info, u_data):
     gst_buffer = info.get_buffer()
@@ -133,34 +134,31 @@ def reid_pad_buffer_probe(pad, info, u_data):
         return Gst.PadProbeReturn.OK
 
     batch_meta = pyds.gst_buffer_get_nvds_batch_meta(hash(gst_buffer))
-    array_of_frames = []
 
+    # ── Pass 1: collect detections and frame_meta refs for every source ──
+    detections_by_source: dict[int, list] = defaultdict(list)
+    frame_meta_by_source: dict[int, object] = {}
+
+    nvtx.push_range("build_detections", color="green")
     l_frame = batch_meta.frame_meta_list
     while l_frame is not None:
         try:
             frame_meta = pyds.NvDsFrameMeta.cast(l_frame.data)
-
         except StopIteration:
             break
 
-        # --- Step 1: Build detections list (mirrors dummy script format) ---
-        detections = []
-        obj_meta_list = []  # parallel list to detections, same index order
+        source_id = frame_meta.source_id
+        frame_meta_by_source[source_id] = frame_meta
 
-        nvtx.push_range("build_detections", color="green")
         l_obj = frame_meta.obj_meta_list
         while l_obj is not None:
             try:
                 obj_meta = pyds.NvDsObjectMeta.cast(l_obj.data)
-                # print(sys.getsizeof(l_obj.data)) 
-                # print(sys.getsizeof(hash(obj_meta))) 
             except StopIteration:
                 break
 
-            # print(obj_meta.parent)
-
             obj_meta.rect_params.border_color.set(0.0, 0.0, 1.0, 1.0)
-            obj_meta.rect_params.border_width = 1 
+            obj_meta.rect_params.border_width = 1
             obj_meta.text_params.display_text = ""
             reid_vector = None
 
@@ -176,53 +174,55 @@ def reid_pad_buffer_probe(pad, info, u_data):
                     tensor_meta = pyds.NvDsInferTensorMeta.cast(user_meta.user_meta_data)
                     layer = pyds.get_nvds_LayerInfo(tensor_meta, 0)
                     ptr = ctypes.cast(pyds.get_ptr(layer.buffer), ctypes.POINTER(ctypes.c_float))
-
                     embed_len = 1
                     for i in range(layer.inferDims.numDims):
                         embed_len *= layer.inferDims.d[i]
-
                     reid_vector = np.copy(np.ctypeslib.as_array(ptr, shape=(embed_len,)))
 
                 l_user = l_user.next
             nvtx.pop_range()  # reid_extract
 
-            # print(frame_meta.source_frame_width, frame_meta.source_frame_height)
-            # if (obj_meta.rect_params.left == 0 or 
-            #     obj_meta.rect_params.top == 0 or
-            #     obj_meta.rect_params.width + obj_meta.rect_params.left ==  or
-            #     obj_meta.rect_params.top + obj_meta.rect_params.height == 1080):
-            #     print("obj non det")
-            
-            is_touching_edge = obj_meta.rect_params.left <= 0 or obj_meta.rect_params.top <= 0 or obj_meta.rect_params.left + obj_meta.rect_params.width >= 1900 or obj_meta.rect_params.top + obj_meta.rect_params.height >= 1060
-
-            detections.append({
+            is_touching_edge = (
+                obj_meta.rect_params.left <= 0
+                or obj_meta.rect_params.top <= 0
+                or obj_meta.rect_params.left + obj_meta.rect_params.width >= 1900
+                or obj_meta.rect_params.top + obj_meta.rect_params.height >= 1060
+            )
+            det = {
                 "obj_meta": l_obj.data,
                 "bbox": np.array([
                     obj_meta.rect_params.left,
                     obj_meta.rect_params.top,
                     obj_meta.rect_params.width,
-                    obj_meta.rect_params.height
+                    obj_meta.rect_params.height,
                 ], dtype=np.float32),
                 "det_confidence": 0.0 if is_touching_edge else obj_meta.confidence,
-                "reid_vector": reid_vector
-            })
-            obj_meta_list.append(obj_meta)
-
+                "reid_vector": reid_vector,
+            }
+            detections_by_source[source_id].append(det)
             l_obj = l_obj.next
-        nvtx.pop_range()  # build_detections
 
-        with nvtx.annotate("tracker_update", color="red"):
-            all_tracks= tracker.update(detections)
-        with nvtx.annotate("registry_step", color="purple"):
-            registry.step(tracker, frame_id=cur_frame)
+        l_frame = l_frame.next
+    nvtx.pop_range() 
 
+    all_tracks_by_source: dict[int, list] = {}
+    with nvtx.annotate("tracker_update", color="red"):
+        for source_id in detections_by_source.keys():
+            if source_id < len(trackers):
+                tracks = trackers[source_id].update(detections_by_source[source_id])
+                # print(detections_by_source)
+                all_tracks_by_source[source_id] = tracks
 
-        # all_tracks = mct.get_tracked_objects()
-        nvtx.push_range("build_display_meta", color="cyan")
-       
-        extracted_data = []
+    with nvtx.annotate("registry_step", color="purple"):
+        registry.step(trackers, frame_id=cur_frame)
 
-        MAX_DISPLAY_SLOTS = 16  # MAX_ELEMENTS_IN_DISPLAY_META
+    nvtx.push_range("build_display_meta", color="cyan")
+    MAX_DISPLAY_SLOTS = 16
+    for source_id, all_tracks in all_tracks_by_source.items():
+        frame_meta = frame_meta_by_source.get(source_id)
+        if frame_meta is None:
+            continue
+
         display_meta = pyds.nvds_acquire_display_meta_from_pool(batch_meta)
         slot = 0
 
@@ -244,7 +244,7 @@ def reid_pad_buffer_probe(pad, info, u_data):
             rect_params.has_bg_color = 0
 
             text_params = display_meta.text_params[slot]
-            text_params.display_text = f"GID: {t.t_global_id}"
+            text_params.display_text = f"GID:{t.t_global_id} C{source_id}"
             text_params.x_offset = max(0, int(t.tlwh[0]))
             text_params.y_offset = max(0, int(t.tlwh[1]))
             text_params.font_params.font_name = "Serif"
@@ -252,10 +252,8 @@ def reid_pad_buffer_probe(pad, info, u_data):
             text_params.font_params.font_color.set(1.0, 1.0, 1.0, 1.0)
             text_params.set_bg_clr = 1
             text_params.text_bg_clr.set(0.0, 0.0, 0.0, 0.7)
-
             slot += 1
 
-        # Summary label needs one extra label slot; acquire a new display_meta if full
         if slot >= MAX_DISPLAY_SLOTS:
             display_meta.num_rects = MAX_DISPLAY_SLOTS
             display_meta.num_labels = MAX_DISPLAY_SLOTS
@@ -265,44 +263,20 @@ def reid_pad_buffer_probe(pad, info, u_data):
 
         display_meta.num_rects = slot
         display_meta.num_labels = slot + 1
-
-        py_nvosd_text_params = display_meta.text_params[slot]
-        py_nvosd_text_params.display_text = f"Global IDs {extracted_data}"
-        py_nvosd_text_params.x_offset = 10
-        py_nvosd_text_params.y_offset = 12
-        py_nvosd_text_params.font_params.font_name = "Serif"
-        py_nvosd_text_params.font_params.font_size = 10
-        py_nvosd_text_params.font_params.font_color.set(1.0, 1.0, 1.0, 1.0)
-        py_nvosd_text_params.set_bg_clr = 1
-        py_nvosd_text_params.text_bg_clr.set(0.0, 0.0, 0.0, 1.0)
-
+        summary = display_meta.text_params[slot]
+        summary.display_text = f"Cam{source_id} active={len(all_tracks)}"
+        summary.x_offset = 10
+        summary.y_offset = 12
+        summary.font_params.font_name = "Serif"
+        summary.font_params.font_size = 10
+        summary.font_params.font_color.set(1.0, 1.0, 1.0, 1.0)
+        summary.set_bg_clr = 1
+        summary.text_bg_clr.set(0.0, 0.0, 0.0, 1.0)
         pyds.nvds_add_display_meta_to_frame(frame_meta, display_meta)
-        nvtx.pop_range()  # build_display_meta
+
+    nvtx.pop_range()  # build_display_meta
 
 
-        # for t in tracker.tracked_stracks:
-        #     best_idx = None
-        #     best_dist = float('inf')
-        #     for idx, det in enumerate(detections):
-        #         dist = np.linalg.norm(t.tlwh - det["bbox"])
-        #         if dist < best_dist:
-        #             best_dist = dist
-        #             best_idx = idx
-
-        #     if best_idx is not None and best_dist < 50:
-        #         obj_meta_list[best_idx].misc_obj_info[0] = t.t_global_id
-
-
-        # for t in tracker.tracked_stracks:
-        #     # best_idx = None
-        #     try:
-        #         obj_meta = pyds.NvDsObjectMeta.cast(t.curr_obj_meta_ref)
-        #         obj_meta.object_id = t.t_global_id
-        #         obj_meta.text_params.display_text = f"ReID:{t.t_global_id}"
-        #     except StopIteration:
-        #         continue
-        array_of_frames.append(detections)
-        l_frame = l_frame.next
     if False:
         starting_frame = array_of_frames[0]["frame_id"]
         save_dir = "deepstream_npy_output"
@@ -389,7 +363,7 @@ def save_dets_pad_buffer_probe(pad, info, u_data):
         starting_frame = array_of_frames[0]["frame_id"]
         
         # 2. Define your output directory and ensure it exists
-        save_dir = "/home/lab314/workspace/reid/ds_backend_reid/MCDPT/deepstream_npy_output"
+        save_dir = "/home/lab314/workspace/reid/ds_backend_reid/MCDPT/deepstream_npy_output2"
         os.makedirs(save_dir, exist_ok=True)
         
         # 3. Create a unique filename for this batch
@@ -461,7 +435,8 @@ def main():
         return
 
 
-    multi_src_bin.set_property("uri-list", "file:///home/lab314/Desktop/camera2_20260525_154131.mp4")
+    # multi_src_bin.set_property("uri-list", "file:///home/lab314/Desktop/camera2_20260525_154131.mp4,file:///home/lab314/Desktop/camera1_20260525_154131.mp4")
+    multi_src_bin.set_property("uri-list", "rtsp://root:root@192.168.6.91/cam1/h264,rtsp://root:root@192.168.6.90/cam1/h264")
     multi_src_bin.set_property("max-batch-size", 10)
     # multi_src_bin.set_property("batch-size", 1)
     # multi_src_bin.set_property("batched-push-timeout", 66666)
@@ -538,7 +513,7 @@ def main():
 
     tiler_rows = int(math.sqrt(num_sources))
     tiler_columns = int(math.ceil(1.0 * num_sources / tiler_rows))
-    tiler_rows = 2
+    tiler_rows = 1
     tiler_columns = 2
     tiler.set_property("rows", tiler_rows)
     tiler.set_property("columns", tiler_columns)

@@ -51,7 +51,7 @@ path_to_botsort_parent = './'
 if path_to_botsort_parent not in sys.path:
     sys.path.append(path_to_botsort_parent)
 
-ROOT_FRAME_DIR = "/home/lakshh/deepstream_npy_output"
+ROOT_FRAME_DIR = "/home/lab314/workspace/reid/ds_backend_reid/MCDPT/deepstream_npy_output2"
 # ROOT_FRAME_DIR = "/home/lab314/workspace/reid/ds_backend_reid/MCDPT/deepstream_npy_output"
 
 from botsort.bot_sort import BoTSORT

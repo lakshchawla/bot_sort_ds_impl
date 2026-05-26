@@ -8,7 +8,7 @@ source-list:
 tiler:
   width: 1920
   # width: 1792
-  height: 1080
+  height: 540
 
 
 sink:

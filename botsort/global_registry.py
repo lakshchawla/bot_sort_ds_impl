@@ -216,16 +216,6 @@ class GlobalRegistry:
 
 
     def step(self, trackers, frame_id: int):
-        """Process one frame across all cameras.
-
-        trackers: a single BoTSORT instance or a list of them.
-                  List position is used as cam_idx (0-based).
-
-        Global ID encoding: person_counter * 1000 + birth_cam_idx.
-          e.g. the 4th registered person first seen on cam 1 → 4001.
-        Internal cam_tid keys: cam_idx * 100_000 + track.track_id,
-          giving each camera a private range of 100k track IDs.
-        """
         if not isinstance(trackers, list):
             trackers = [trackers]
 
