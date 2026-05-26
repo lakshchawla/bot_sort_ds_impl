@@ -1,15 +1,20 @@
 source-list:
   #  list: file:///home/lab314/Downloads/output_h264_trim.mp4;
+  # list: rtsp://root:root@192.168.6.91/cam1/h264;
   #  list: rtsp://admin:123456@192.168.3.123/stream0;
-  list: rtsp://root:root@192.168.6.91/cam1/h264;
   # list: v4l2:///dev/video2
-  #  list: file:///home/lab314/Videos/video_cut.mp4;
+   list: file:///home/lab314/Videos/video_cut.mp4;
+
+streammux:
+  batch-size: 1
+  width: 1920
+  height: 1080
 
 tiler:
-  width: 1920
+  # width: 1920
   # width: 1792
+  width: 960
   height: 540
-
 
 sink:
   qos: 0

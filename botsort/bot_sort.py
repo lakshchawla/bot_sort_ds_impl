@@ -31,8 +31,8 @@ class STrack(BaseTrack):
         self.is_activated = False
 
         self.score = score
-
         self.tracklet_len = 0
+
         self.smooth_feat = None
         self.curr_feat = None
         self.pose = pose
@@ -239,7 +239,7 @@ class STrack(BaseTrack):
 
 class BoTSORT(object):
     def __init__(self, track_high_thresh=0.6, track_low_thresh=0.1, new_track_thresh=0.7, track_buffer=30, 
-                match_thresh=0.8, with_reid=True, proximity_thresh=0.1, appearance_thresh=0.4, euc_thresh=0.1, 
+                match_thresh=0.8, with_reid=True, proximity_thresh=0.5, appearance_thresh=0.4, euc_thresh=0.1, 
                 fuse_score=True, frame_rate=30, max_batch_size=8, map_len=None, real_data=True, registry = None):
         self.tracked_stracks = []  # type: list[STrack]
         self.lost_stracks = []  # type: list[STrack]
@@ -254,7 +254,7 @@ class BoTSORT(object):
 
         self.buffer_size = int(frame_rate / 30.0 * track_buffer)
         # self.max_time_lost = self.buffer_size
-        self.max_time_lost = 90
+        self.max_time_lost = 2000
         self.kalman_filter = KalmanFilter()
 
         self.match_thresh = match_thresh
@@ -283,6 +283,10 @@ class BoTSORT(object):
         refind_stracks = []
         lost_stracks = []
         removed_stracks = []
+        
+        print(f"[BS] Tracked Stracks\t{self.tracked_stracks}")
+        print(f"[BS] Lost Stracks\t{self.lost_stracks}")
+        print(f"[BS] Removed Strack\t{self.removed_stracks}")
 
         if len(output_results):
             scores = np.array([d['det_confidence'] for d in output_results])
@@ -344,6 +348,7 @@ class BoTSORT(object):
             new_ratio = None
             detections = []
 
+        ''' Add newly detected tracklets to tracked_stracks'''
         unconfirmed = []
         tracked_stracks = []  # type: list[STrack]
         for track in self.tracked_stracks:
@@ -352,28 +357,48 @@ class BoTSORT(object):
             else:
                 tracked_stracks.append(track)
 
+        ''' Step 2: First association, with high score detection boxes'''
         strack_pool = joint_stracks(tracked_stracks, self.lost_stracks)
 
+        # Predict the current location with KF
         STrack.multi_predict(strack_pool)
 
+        # Fix camera motion
+        # warp = self.gmc.apply(img, dets)
+        # STrack.multi_gmc(strack_pool, warp)
+        # STrack.multi_gmc(unconfirmed, warp)
+
+        # Associate with high score detection boxes
+
+        # if self.fuse_score:
+            # ious_dists = matching.fuse_score(ious_dists, detections)
+        
+        # centroid_dists = matching.centroid_distance(strack_pool, detections)
+        # centroid_dists /= self.max_len
+        # centroid_dists_mask = (centroid_dists > self.proximity_thresh)
+
+
         ious_dists = matching.iou_distance(strack_pool, detections)
+
         if self.with_reid:
             emb_dists = matching.embedding_distance(strack_pool, detections)
-
+            # print(f"[EMBD]: {emb_dists}")
+            # print(f"[IOUS]: {ious_dists}")
             valid_mask = np.logical_and(
                 emb_dists < self.appearance_thresh, 
                 ious_dists < self.proximity_thresh
             )
-
+            
             hat_emb_dists = np.ones_like(emb_dists)
             hat_emb_dists[valid_mask] = emb_dists[valid_mask]
-            # dists = np.minimum(ious_dists, hat_emb_dists)
-            alpha = 0.4 
-            dists = alpha * ious_dists + (1 - alpha) * hat_emb_dists
+            # print(hat_emb_dists)
+            dists = np.minimum(ious_dists, hat_emb_dists)
+            
         else:
             dists = ious_dists
 
         matches, u_track, u_detection = matching.linear_assignment(dists, thresh=self.match_thresh)
+    
 
         for itracked, idet in matches:
             track = strack_pool[itracked]
@@ -467,6 +492,9 @@ class BoTSORT(object):
             if self.frame_id - track.end_frame > self.max_time_lost:
                 track.mark_removed()
                 removed_stracks.append(track)
+                # ← ADD THESE 2 LINES:
+                if self.registry is not None:
+                    self.registry.deactivate_track(track.track_id)
 
         """ Merge """
         self.tracked_stracks = [t for t in self.tracked_stracks if t.state == TrackState.Tracked]
@@ -482,10 +510,10 @@ class BoTSORT(object):
         # output_stracks = [track for track in self.tracked_stracks if track.is_activated]
         output_stracks = [track for track in self.tracked_stracks]
         
-        disp_curr = np.array([t.t_global_id for t in activated_starcks])
+        # disp_curr = np.array([t.t_global_id for t in activated_starcks])
         # print(f"[CURR] {disp_curr}")
         
-        disp_lost = np.array([t.t_global_id for t in self.lost_stracks])
+        # disp_lost = np.array([t.t_global_id for t in self.lost_stracks])
         # print(f"[LOST] {disp_lost}")
         
         if not len(unconfirmed): 

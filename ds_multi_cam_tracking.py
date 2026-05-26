@@ -213,8 +213,8 @@ def reid_pad_buffer_probe(pad, info, u_data):
                 # print(detections_by_source)
                 all_tracks_by_source[source_id] = tracks
 
-    with nvtx.annotate("registry_step", color="purple"):
-        registry.step(trackers, frame_id=cur_frame)
+    # with nvtx.annotate("registry_step", color="purple"):
+    #     registry.step(trackers, frame_id=cur_frame)
 
     nvtx.push_range("build_display_meta", color="cyan")
     MAX_DISPLAY_SLOTS = 16
@@ -435,8 +435,8 @@ def main():
         return
 
 
-    # multi_src_bin.set_property("uri-list", "file:///home/lab314/Desktop/camera2_20260525_154131.mp4,file:///home/lab314/Desktop/camera1_20260525_154131.mp4")
-    multi_src_bin.set_property("uri-list", "rtsp://root:root@192.168.6.91/cam1/h264,rtsp://root:root@192.168.6.90/cam1/h264")
+    multi_src_bin.set_property("uri-list", "file:///home/lab314/Desktop/camera2_20260525_154131.mp4,file:///home/lab314/Desktop/camera1_20260525_154131.mp4")
+    # multi_src_bin.set_property("uri-list", "rtsp://root:root@192.168.6.91/cam1/h264,rtsp://root:root@192.168.6.90/cam1/h264")
     multi_src_bin.set_property("max-batch-size", 10)
     # multi_src_bin.set_property("batch-size", 1)
     # multi_src_bin.set_property("batched-push-timeout", 66666)

@@ -28,46 +28,40 @@ from multicam_tracker.cluster_track import MCTracker
 from botsort.global_registry import GlobalRegistry
 
 
-# Per-source tracker state — populated lazily when a source_id is first seen
-trackers:    dict = {}   # source_id -> BoTSORT
-registries:  dict = {}   # source_id -> GlobalRegistry
-frame_counters: dict = defaultdict(int)  # source_id -> per-cam frame count
-global_frame = 0         # incremented once per probe call (i.e. per batch)
+registry = GlobalRegistry(
+    match_threshold=0.3,
+    min_frames=5,
+    max_emb=50,
+    emb_dim=256,    
+)
 
-def _get_or_create_cam(source_id):
-    if source_id not in trackers:
-        reg = GlobalRegistry(match_threshold=0.3, min_frames=5, max_emb=50, emb_dim=256)
-        registries[source_id] = reg
-        trackers[source_id] = BoTSORT(
-            track_high_thresh=0.6,
-            track_low_thresh=0.1,
-            new_track_thresh=0.3,
-            track_buffer=600,
-            match_thresh=0.8,
-            with_reid=True,
-            proximity_thresh=0.5,
-            appearance_thresh=0.2,
-            euc_thresh=0.1,
-            fuse_score=True,
-            frame_rate=30,
-            max_batch_size=8,
-            map_len=None,
-            real_data=True,
-            registry=reg,
-        )
-    return trackers[source_id], registries[source_id]
+tracker = BoTSORT(
+    track_high_thresh=0.6,
+    track_low_thresh=0.1,
+    new_track_thresh=0.3,
+    track_buffer=600,
+    match_thresh=0.8,
+    with_reid=True,
+    proximity_thresh=0.5,
+    appearance_thresh=0.2,
+    euc_thresh=0.1,
+    fuse_score=True,
+    frame_rate=30,
+    max_batch_size=8,
+    map_len=None,
+    real_data=True,
+    registry=registry,
+    # frame_width=1920,
+    # frame_height=1080,
+)
 
-clustering     = Clustering(appearance_thresh=0.75, euc_thresh=0.3, match_thresh=0.8)
-scene          = 'scene_061'
-mc_tracker     = MCTracker(appearance_thresh=0.25, match_thresh=0.8, scene=scene)
+clustering    = Clustering(appearance_thresh=0.75, euc_thresh=0.3, match_thresh=0.8)
+scene         = 'scene_061'
+mc_tracker    = MCTracker(appearance_thresh=0.25, match_thresh=0.8, scene=scene)
 id_distributor = ID_Distributor()
 
-# Maps (source_id, local_track_id) -> stable global ID, assigned exactly once.
-# MCT can still overwrite t.t_global_id with its cross-cam cluster ID each frame;
-# this map makes sure tracks without a cluster assignment yet show a stable ID.
-_stable_id_map: dict = {}
-
 PERF_MODE = os.environ.get("NVDS_TEST3_PERF_MODE") == "1"
+cur_frame  = 0
 ACTIVE_FORMAT = "tlwh"
 
 def bus_call(bus, message, loop):
@@ -149,21 +143,13 @@ import nvtx
 
 @nvtx.annotate("reid_probe", color="blue")
 def reid_pad_buffer_probe(pad, info, u_data):
-    global global_frame
-
     gst_buffer = info.get_buffer()
     if not gst_buffer:
         return Gst.PadProbeReturn.OK
 
     batch_meta = pyds.gst_buffer_get_nvds_batch_meta(hash(gst_buffer))
+    array_of_frames = []
 
-    # ------------------------------------------------------------------ #
-    # Pass 1: collect detections per source and run per-camera trackers   #
-    # ------------------------------------------------------------------ #
-    # Each entry: (source_id, frame_meta, all_tracks)
-    frame_results = []
-
-    nvtx.push_range("per_cam_tracking", color="green")
     l_frame = batch_meta.frame_meta_list
     while l_frame is not None:
         try:
@@ -171,113 +157,84 @@ def reid_pad_buffer_probe(pad, info, u_data):
         except StopIteration:
             break
 
-        source_id = frame_meta.source_id
-        tracker, registry = _get_or_create_cam(source_id)
-
-        # Build detections for this camera frame
+        # --- Step 1: Build detections list (mirrors dummy script format) ---
         detections = []
-        nvtx.push_range(f"build_detections_src{source_id}", color="yellow")
+        obj_meta_list = []  # parallel list to detections, same index order
+
+        nvtx.push_range("build_detections", color="green")
         l_obj = frame_meta.obj_meta_list
         while l_obj is not None:
             try:
                 obj_meta = pyds.NvDsObjectMeta.cast(l_obj.data)
+                # print(sys.getsizeof(l_obj.data)) 
+                # print(sys.getsizeof(hash(obj_meta))) 
             except StopIteration:
                 break
 
             obj_meta.rect_params.border_color.set(0.0, 0.0, 1.0, 1.0)
-            obj_meta.rect_params.border_width = 1
+            obj_meta.rect_params.border_width = 1 
             obj_meta.text_params.display_text = ""
-
             reid_vector = None
+
+            nvtx.push_range("reid_extract", color="yellow")
             l_user = obj_meta.obj_user_meta_list
             while l_user is not None:
                 try:
                     user_meta = pyds.NvDsUserMeta.cast(l_user.data)
                 except StopIteration:
                     break
+
                 if user_meta.base_meta.meta_type == pyds.NvDsMetaType.NVDSINFER_TENSOR_OUTPUT_META:
                     tensor_meta = pyds.NvDsInferTensorMeta.cast(user_meta.user_meta_data)
                     layer = pyds.get_nvds_LayerInfo(tensor_meta, 0)
                     ptr = ctypes.cast(pyds.get_ptr(layer.buffer), ctypes.POINTER(ctypes.c_float))
+
                     embed_len = 1
                     for i in range(layer.inferDims.numDims):
                         embed_len *= layer.inferDims.d[i]
-                    reid_vector = np.copy(np.ctypeslib.as_array(ptr, shape=(embed_len,)))
-                l_user = l_user.next
 
-            is_touching_edge = (
-                obj_meta.rect_params.left <= 0 or
-                obj_meta.rect_params.top <= 0 or
-                obj_meta.rect_params.left + obj_meta.rect_params.width >= 1900 or
-                obj_meta.rect_params.top + obj_meta.rect_params.height >= 1060
-            )
+                    reid_vector = np.copy(np.ctypeslib.as_array(ptr, shape=(embed_len,)))
+
+                l_user = l_user.next
+            nvtx.pop_range()  # reid_extract
+
+            # print(frame_meta.source_frame_width, frame_meta.source_frame_height)
+            # if (obj_meta.rect_params.left == 0 or 
+            #     obj_meta.rect_params.top == 0 or
+            #     obj_meta.rect_params.width + obj_meta.rect_params.left ==  or
+            #     obj_meta.rect_params.top + obj_meta.rect_params.height == 1080):
+            #     print("obj non det")
+            
+            is_touching_edge = obj_meta.rect_params.left <= 0 or obj_meta.rect_params.top <= 0 or obj_meta.rect_params.left + obj_meta.rect_params.width >= 1900 or obj_meta.rect_params.top + obj_meta.rect_params.height >= 1060
+
             detections.append({
                 "obj_meta": l_obj.data,
                 "bbox": np.array([
                     obj_meta.rect_params.left,
                     obj_meta.rect_params.top,
                     obj_meta.rect_params.width,
-                    obj_meta.rect_params.height,
+                    obj_meta.rect_params.height
                 ], dtype=np.float32),
                 "det_confidence": 0.0 if is_touching_edge else obj_meta.confidence,
-                "reid_vector": reid_vector,
+                "reid_vector": reid_vector
             })
+            obj_meta_list.append(obj_meta)
+
             l_obj = l_obj.next
         nvtx.pop_range()  # build_detections
 
-        # Run per-camera single-cam tracker
-        with nvtx.annotate(f"tracker_update_src{source_id}", color="red"):
-            all_tracks = tracker.update(detections)
-        with nvtx.annotate(f"registry_step_src{source_id}", color="purple"):
-            registry.step(tracker, frame_id=frame_counters[source_id])
+        with nvtx.annotate("tracker_update", color="red"):
+            all_tracks= tracker.update(detections)
+        with nvtx.annotate("registry_step", color="purple"):
+            registry.step(tracker, frame_id=cur_frame)
 
-        # Sync _stable_id_map with registry assignments.
-        # registry.step() just ran and may have set t.t_global_id for newly
-        # matured or re-entering tracks.  We must NOT overwrite those values.
-        # Only give a stable temporary ID (for MCT clustering) to tracks that
-        # are still inside the min_frames warmup window (t_global_id == 0).
-        for t in tracker.tracked_stracks:
-            key = (source_id, t.track_id)
-            if t.t_global_id != 0:
-                # Registry has a gallery-matched ID; pin it in the map so it
-                # survives even if registry short-circuits on future steps.
-                _stable_id_map[key] = t.t_global_id
-            else:
-                # Still warming up — provide a consistent token for MCT.
-                if key not in _stable_id_map:
-                    _stable_id_map[key] = id_distributor.assign_id()
-                t.t_global_id = _stable_id_map[key]
 
-        # Evict permanently removed tracks to keep the map from growing forever
-        for t in tracker.removed_stracks:
-            _stable_id_map.pop((source_id, t.track_id), None)
+        # all_tracks = mct.get_tracked_objects()
+        nvtx.push_range("build_display_meta", color="cyan")
+       
+        extracted_data = []
 
-        frame_counters[source_id] += 1
-        frame_results.append((source_id, frame_meta, all_tracks))
-        l_frame = l_frame.next
-    nvtx.pop_range()  # per_cam_tracking
-
-    # ------------------------------------------------------------------ #
-    # Cross-camera MCT step (mirrors eval_mcpt.py multi-cam loop)         #
-    # ------------------------------------------------------------------ #
-    if trackers:
-        tracker_list = list(trackers.values())
-        with nvtx.annotate("mct_clustering", color="orange"):
-            groups = clustering.update(tracker_list, global_frame, scene)
-            mc_tracker.update(tracker_list, groups)
-            clustering.update_using_mctracker(tracker_list, mc_tracker)
-        if global_frame % 5 == 0:
-            with nvtx.annotate("mct_refinement", color="pink"):
-                mc_tracker.refinement_clusters()
-
-    global_frame += 1
-
-    # ------------------------------------------------------------------ #
-    # Pass 2: build display metas using final cross-camera global IDs     #
-    # ------------------------------------------------------------------ #
-    MAX_DISPLAY_SLOTS = 16
-    nvtx.push_range("build_display_meta", color="cyan")
-    for source_id, frame_meta, all_tracks in frame_results:
+        MAX_DISPLAY_SLOTS = 16  # MAX_ELEMENTS_IN_DISPLAY_META
         display_meta = pyds.nvds_acquire_display_meta_from_pool(batch_meta)
         slot = 0
 
@@ -299,8 +256,7 @@ def reid_pad_buffer_probe(pad, info, u_data):
             rect_params.has_bg_color = 0
 
             text_params = display_meta.text_params[slot]
-            gid_label = str(t.t_global_id) if t.t_global_id != 0 else f"L{t.track_id}"
-            text_params.display_text = f"GID:{gid_label} C:{source_id}"
+            text_params.display_text = f"GID: {t.t_global_id}"
             text_params.x_offset = max(0, int(t.tlwh[0]))
             text_params.y_offset = max(0, int(t.tlwh[1]))
             text_params.font_params.font_name = "Serif"
@@ -308,9 +264,10 @@ def reid_pad_buffer_probe(pad, info, u_data):
             text_params.font_params.font_color.set(1.0, 1.0, 1.0, 1.0)
             text_params.set_bg_clr = 1
             text_params.text_bg_clr.set(0.0, 0.0, 0.0, 0.7)
+
             slot += 1
 
-        # Flush last partially-filled display_meta and add summary label
+        # Summary label needs one extra label slot; acquire a new display_meta if full
         if slot >= MAX_DISPLAY_SLOTS:
             display_meta.num_rects = MAX_DISPLAY_SLOTS
             display_meta.num_labels = MAX_DISPLAY_SLOTS
@@ -320,18 +277,52 @@ def reid_pad_buffer_probe(pad, info, u_data):
 
         display_meta.num_rects = slot
         display_meta.num_labels = slot + 1
-        summary = display_meta.text_params[slot]
-        summary.display_text = f"Cam {source_id} | tracks: {len(all_tracks)}"
-        summary.x_offset = 10
-        summary.y_offset = 12
-        summary.font_params.font_name = "Serif"
-        summary.font_params.font_size = 10
-        summary.font_params.font_color.set(1.0, 1.0, 1.0, 1.0)
-        summary.set_bg_clr = 1
-        summary.text_bg_clr.set(0.0, 0.0, 0.0, 1.0)
-        pyds.nvds_add_display_meta_to_frame(frame_meta, display_meta)
 
-    nvtx.pop_range()  # build_display_meta
+        py_nvosd_text_params = display_meta.text_params[slot]
+        py_nvosd_text_params.display_text = f"Global IDs {extracted_data}"
+        py_nvosd_text_params.x_offset = 10
+        py_nvosd_text_params.y_offset = 12
+        py_nvosd_text_params.font_params.font_name = "Serif"
+        py_nvosd_text_params.font_params.font_size = 10
+        py_nvosd_text_params.font_params.font_color.set(1.0, 1.0, 1.0, 1.0)
+        py_nvosd_text_params.set_bg_clr = 1
+        py_nvosd_text_params.text_bg_clr.set(0.0, 0.0, 0.0, 1.0)
+
+        pyds.nvds_add_display_meta_to_frame(frame_meta, display_meta)
+        nvtx.pop_range()  # build_display_meta
+
+
+        # for t in tracker.tracked_stracks:
+        #     best_idx = None
+        #     best_dist = float('inf')
+        #     for idx, det in enumerate(detections):
+        #         dist = np.linalg.norm(t.tlwh - det["bbox"])
+        #         if dist < best_dist:
+        #             best_dist = dist
+        #             best_idx = idx
+
+        #     if best_idx is not None and best_dist < 50:
+        #         obj_meta_list[best_idx].misc_obj_info[0] = t.t_global_id
+
+
+        # for t in tracker.tracked_stracks:
+        #     # best_idx = None
+        #     try:
+        #         obj_meta = pyds.NvDsObjectMeta.cast(t.curr_obj_meta_ref)
+        #         obj_meta.object_id = t.t_global_id
+        #         obj_meta.text_params.display_text = f"ReID:{t.t_global_id}"
+        #     except StopIteration:
+        #         continue
+        array_of_frames.append(detections)
+        l_frame = l_frame.next
+    if False:
+        starting_frame = array_of_frames[0]["frame_id"]
+        save_dir = "deepstream_npy_output"
+        os.makedirs(save_dir, exist_ok=True)
+        filename = os.path.join(save_dir, f"batch_frame_{startig_frame}.npy")
+        np_data = np.array(array_of_frames, dtype=object)
+        np.save(filename, np_data)
+
     return Gst.PadProbeReturn.OK
 
 def save_dets_pad_buffer_probe(pad, info, u_data):
@@ -451,16 +442,6 @@ def main():
     sources = [s for s in sources if s]
 
     num_sources = len(sources)
-
-    # Pre-create all per-camera trackers now, before the pipeline starts.
-    # BoTSORT.__init__ calls BaseTrack.clear_count(), which resets a shared
-    # class-level counter.  Creating trackers lazily inside the probe would
-    # reset that counter mid-run, causing track_id collisions within a camera
-    # and corrupting both _stable_id_map and the per-camera registry mappings.
-    for i in range(num_sources):
-        _get_or_create_cam(i)
-    sys.stdout.write(f"Pre-created {num_sources} per-camera trackers.\n")
-
     for i, uri in enumerate(sources):
         sys.stdout.write(f"Now playing : {uri}\n")
         source_bin = create_source_bin(i, uri)
