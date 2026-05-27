@@ -243,7 +243,10 @@ class BoTSORT(object):
                 fuse_score=True, frame_rate=30, max_batch_size=8, map_len=None, real_data=True, registry = None):
         self.tracked_stracks = []  # type: list[STrack]
         self.lost_stracks = []  # type: list[STrack]
+
+        # check viability of removed stracks + filter for removed tracks
         self.removed_stracks = []  # type: list[STrack]
+        
         BaseTrack.clear_count()
 
         self.frame_id = 0

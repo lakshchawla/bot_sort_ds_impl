@@ -26,8 +26,6 @@ if path_to_botsort_parent not in sys.path:
     sys.path.append(path_to_botsort_parent)
  
 from botsort.bot_sort import BoTSORT
-from multicam_tracker.clustering import Clustering, ID_Distributor
-from multicam_tracker.cluster_track import MCTracker
 from botsort.global_registry import GlobalRegistry
 
 
@@ -58,10 +56,6 @@ tracker = BoTSORT(
     # frame_height=1080,
 )
 
-clustering    = Clustering(appearance_thresh=0.75, euc_thresh=0.3, match_thresh=0.8)
-scene         = 'scene_061'
-mc_tracker    = MCTracker(appearance_thresh=0.25, match_thresh=0.8, scene=scene)
-id_distributor = ID_Distributor()
 
 PERF_MODE = os.environ.get("NVDS_TEST3_PERF_MODE") == "1"
 cur_frame  = 0
@@ -405,7 +399,7 @@ def save_dets_pad_buffer_probe(pad, info, u_data):
         starting_frame = array_of_frames[0]["frame_id"]
         
         # 2. Define your output directory and ensure it exists
-        save_dir = "/home/lab314/workspace/reid/ds_backend_reid/MCDPT/deepstream_npy_output"
+        save_dir = "/home/lab314/workspace/reid/ds_backend_reid/MCDPT/deepstream_npy_output_videocutreid"
         os.makedirs(save_dir, exist_ok=True)
         
         # 3. Create a unique filename for this batch
@@ -595,7 +589,7 @@ def main():
         if not reid_sgie_pad:
             sys.stderr.write("Could not get nvdslogger src pad. Exiting.\n")
             return -1
-        reid_sgie_pad.add_probe(Gst.PadProbeType.BUFFER, reid_pad_buffer_probe, 0)
+        reid_sgie_pad.add_probe(Gst.PadProbeType.BUFFER, save_dets_pad_buffer_probe, 0)
 
     pipeline.set_state(Gst.State.PLAYING)
 
