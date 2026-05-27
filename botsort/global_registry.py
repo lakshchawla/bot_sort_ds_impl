@@ -83,7 +83,7 @@ class GlobalRegistry:
         Multi-cam source N:      N*1000+1, N*1000+2, ...
         """
         self._cam_id_ctrs[cam_idx] = self._cam_id_ctrs.get(cam_idx, 0) + 1
-        return cam_idx * 1_000 + self._cam_id_ctrs[cam_idx]
+        return (cam_idx + 1) * 1_000 + self._cam_id_ctrs[cam_idx]
 
     def query(self, feat: np.ndarray) -> tuple[Optional[GalleryEntry], float]:
         if self._index.ntotal == 0 or feat is None:

@@ -218,6 +218,8 @@ def reid_pad_buffer_probe(pad, info, u_data):
                 tracks = trackers[source_id].update(dets)
                 all_tracks_by_source[source_id] = tracks
 
+    print()
+
     with nvtx.annotate("registry_step", color="purple"):
         # Per-source async update: uses frame_meta.frame_num as the per-stream
         # frame reference and namespaces tids via cam_base = source_id * 100_000.
@@ -389,39 +391,6 @@ def save_dets_pad_buffer_probe(pad, info, u_data):
 
     return Gst.PadProbeReturn.OK
 
-# ---------------------------------------------------------------------------
-# Play / Pause (SPACE key)
-# ---------------------------------------------------------------------------
-_paused       = False
-_pipeline_ref = None          # set in main() after pipeline is built
-_kb_stop      = threading.Event()
-
-def _keyboard_listener():
-    """Background daemon thread: toggles play/pause on SPACE keypress."""
-    global _paused, _pipeline_ref
-    fd = sys.stdin.fileno()
-    old_settings = termios.tcgetattr(fd)
-    try:
-        tty.setcbreak(fd)          # chars available immediately; Ctrl-C still works
-        while not _kb_stop.is_set():
-            r, _, _ = select.select([sys.stdin], [], [], 0.2)  # 200 ms poll
-            if r:
-                ch = sys.stdin.read(1)
-                if ch == ' ' and _pipeline_ref is not None:
-                    _paused = not _paused
-                    if _paused:
-                        _pipeline_ref.set_state(Gst.State.PAUSED)
-                        sys.stdout.write("\n[PAUSED]  Press SPACE to resume\n")
-                    else:
-                        _pipeline_ref.set_state(Gst.State.PLAYING)
-                        sys.stdout.write("\n[PLAYING]\n")
-                    sys.stdout.flush()
-    except Exception:
-        pass
-    finally:
-        termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
-# ---------------------------------------------------------------------------
-
 def main():
     global _pipeline_ref
     Gst.init(None)
@@ -436,21 +405,22 @@ def main():
 
     loop = GLib.MainLoop()
     pipeline = Gst.Pipeline.new("dstest3-pipeline")
+
+
     # streammux = Gst.ElementFactory.make("nvstreammux", "stream-muxer")
     # pipeline.add(streammux)
 
     # Parse Source List
-    source_list_config = config.get('source-list', {})
-    sources = []
-    for key, value in source_list_config.items():
-        if key.startswith('list'):
-            if isinstance(value, str):
-                sources.extend(value.split(';'))
-            elif isinstance(value, list):
-                sources.extend(value)
-    sources = [s for s in sources if s]
+    # source_list_config = config.get('source-list', {})
+    # sources = []
+    # for key, value in source_list_config.items():
+    #     if key.startswith('list'):
+    #         if isinstance(value, str):
+    #             sources.extend(value.split(';'))
+    #         elif isinstance(value, list):
+    #             sources.extend(value)
+    # sources = [s for s in sources if s]
 
-    num_sources = len(sources)
     # for i, uri in enumerate(sources):
     #     sys.stdout.write(f"Now playing : {uri}\n")
     #     multi_src_bin = create_source_bin(i, uri)
@@ -475,6 +445,8 @@ def main():
     #         return -1
 
     # multi_src_bin = Gst.ElementFactory.make("nvmultiurisrcbin", "src-bin")
+
+
     multi_src_bin = Gst.ElementFactory.make("nvmultiurisrcbin", "multi-uri-source")
 
     if not multi_src_bin:
@@ -482,8 +454,9 @@ def main():
         return
 
 
-    multi_src_bin.set_property("uri-list", "file:///home/lab314/Desktop/camera2_20260525_154131.mp4,file:///home/lab314/Desktop/camera1_20260525_154131.mp4")
-    # multi_src_bin.set_property("uri-list", "rtsp://root:root@192.168.6.91/cam1/h264,rtsp://root:root@192.168.6.90/cam1/h264")
+    # multi_src_bin.set_property("uri-list", "file:///home/lab314/Desktop/camera2_20260525_154131.mp4,file:///home/lab314/Desktop/camera1_20260525_154131.mp4")
+    multi_src_bin.set_property("uri-list", "rtsp://root:root@192.168.6.91/cam1/h264,rtsp://root:root@192.168.6.90/cam1/h264")
+    num_sources = 2
     multi_src_bin.set_property("max-batch-size", 10)
     # multi_src_bin.set_property("batch-size", 1)
     # multi_src_bin.set_property("batched-push-timeout", 66666)
@@ -544,7 +517,6 @@ def main():
     if sgie1_config_path:
         sgie1.set_property('config-file-path', sgie1_config_path)
 
-    # Batch size override
     pgie_batch_size = pgie.get_property("batch-size")
     if pgie_batch_size != num_sources:
         sys.stderr.write(f"WARNING: Overriding infer-config batch-size ({pgie_batch_size}) with number of sources ({num_sources})\n")
