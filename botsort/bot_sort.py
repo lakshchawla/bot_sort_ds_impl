@@ -284,9 +284,11 @@ class BoTSORT(object):
         lost_stracks = []
         removed_stracks = []
         
-        print(f"[BS] Tracked Stracks\t{self.tracked_stracks}")
-        print(f"[BS] Lost Stracks\t{self.lost_stracks}")
-        print(f"[BS] Removed Strack\t{self.removed_stracks}")
+        
+        
+        print(f"[BS] Tracked Stracks\t{[(track.t_global_id, track.track_id) for track in self.tracked_stracks]}")
+        print(f"[BS] Lost Stracks\t{[(track.t_global_id, track.track_id) for track in self.lost_stracks]}")
+        print(f"[BS] Removed Strack\t{[(track.t_global_id, track.track_id) for track in self.removed_stracks]}")
 
         if len(output_results):
             scores = np.array([d['det_confidence'] for d in output_results])

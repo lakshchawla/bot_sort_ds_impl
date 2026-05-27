@@ -4,6 +4,9 @@ import math
 import platform
 import yaml
 import ctypes
+import tty
+import termios
+import select
 
 import gi
 gi.require_version('Gst', '1.0')
@@ -207,14 +210,24 @@ def reid_pad_buffer_probe(pad, info, u_data):
 
     all_tracks_by_source: dict[int, list] = {}
     with nvtx.annotate("tracker_update", color="red"):
-        for source_id in detections_by_source.keys():
+        # Iterate frame_meta_by_source so sources with zero detections in this
+        # batch still advance their tracker (marks tracks lost over time).
+        for source_id, frame_meta in frame_meta_by_source.items():
             if source_id < len(trackers):
-                tracks = trackers[source_id].update(detections_by_source[source_id])
-                # print(detections_by_source)
+                dets   = detections_by_source.get(source_id, [])
+                tracks = trackers[source_id].update(dets)
                 all_tracks_by_source[source_id] = tracks
 
-    # with nvtx.annotate("registry_step", color="purple"):
-    #     registry.step(trackers, frame_id=cur_frame)
+    with nvtx.annotate("registry_step", color="purple"):
+        # Per-source async update: uses frame_meta.frame_num as the per-stream
+        # frame reference and namespaces tids via cam_base = source_id * 100_000.
+        for source_id, frame_meta in frame_meta_by_source.items():
+            if source_id < len(trackers):
+                registry.step_source(
+                    trackers[source_id],
+                    cam_idx=source_id,
+                    frame_id=frame_meta.frame_num,
+                )
 
     nvtx.push_range("build_display_meta", color="cyan")
     MAX_DISPLAY_SLOTS = 16
@@ -376,7 +389,41 @@ def save_dets_pad_buffer_probe(pad, info, u_data):
 
     return Gst.PadProbeReturn.OK
 
+# ---------------------------------------------------------------------------
+# Play / Pause (SPACE key)
+# ---------------------------------------------------------------------------
+_paused       = False
+_pipeline_ref = None          # set in main() after pipeline is built
+_kb_stop      = threading.Event()
+
+def _keyboard_listener():
+    """Background daemon thread: toggles play/pause on SPACE keypress."""
+    global _paused, _pipeline_ref
+    fd = sys.stdin.fileno()
+    old_settings = termios.tcgetattr(fd)
+    try:
+        tty.setcbreak(fd)          # chars available immediately; Ctrl-C still works
+        while not _kb_stop.is_set():
+            r, _, _ = select.select([sys.stdin], [], [], 0.2)  # 200 ms poll
+            if r:
+                ch = sys.stdin.read(1)
+                if ch == ' ' and _pipeline_ref is not None:
+                    _paused = not _paused
+                    if _paused:
+                        _pipeline_ref.set_state(Gst.State.PAUSED)
+                        sys.stdout.write("\n[PAUSED]  Press SPACE to resume\n")
+                    else:
+                        _pipeline_ref.set_state(Gst.State.PLAYING)
+                        sys.stdout.write("\n[PLAYING]\n")
+                    sys.stdout.flush()
+    except Exception:
+        pass
+    finally:
+        termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+# ---------------------------------------------------------------------------
+
 def main():
+    global _pipeline_ref
     Gst.init(None)
 
     yaml_file = "ds_include/app_config.yml"
@@ -554,14 +601,17 @@ def main():
 
     pipeline.set_state(Gst.State.PLAYING)
 
-    sys.stdout.write("Running...\n")
+    _pipeline_ref = pipeline
+    kb_thread = threading.Thread(target=_keyboard_listener, daemon=True, name="kb-listener")
+    kb_thread.start()
+    sys.stdout.write("Running...  [SPACE] to pause/resume\n")
     try:
         loop.run()
     except BaseException:
         pass
+    finally:
+        _kb_stop.set()
 
-
-        
     sys.stdout.write("Returned, stopping playback\n")
     pipeline.set_state(Gst.State.NULL)
     sys.stdout.write("Deleting pipeline\n")

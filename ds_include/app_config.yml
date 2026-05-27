@@ -3,7 +3,7 @@ source-list:
   # list: rtsp://root:root@192.168.6.91/cam1/h264;
   #  list: rtsp://admin:123456@192.168.3.123/stream0;
   # list: v4l2:///dev/video2
-   list: file:///home/lab314/Videos/video_cut.mp4;
+   list: file:///home/lakshh/video_cut_reid.mp4;
 
 streammux:
   batch-size: 1
@@ -21,11 +21,11 @@ sink:
 
 primary-gie:  
   plugin-type: 0  
-  config-file-path: /home/lab314/workspace/reid/bot_sort_ds_impl/ds_include/dstest3_pgie_config.yml
+  config-file-path: /home/lakshh/workspace/reid/bot_sort_ds_impl/ds_include/dstest3_pgie_config.yml
 
 secondary-gie-1:
   plugin-type: 0
-  config-file-path: /home/lab314/workspace/reid/bot_sort_ds_impl/ds_include/sgie_config.yml
+  config-file-path: /home/lakshh/workspace/reid/bot_sort_ds_impl/ds_include/sgie_config.yml
 
 # tracker:
 #   enable: 0

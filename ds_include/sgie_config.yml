@@ -9,7 +9,7 @@ property:
   batch-size: 50
   network-mode: 2
   network-type: 100
-  interval: 10
+  interval: 0
   process-mode: 2
   # cluster-mode: 3
   classifier-threshold: 0
