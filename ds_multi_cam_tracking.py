@@ -32,9 +32,18 @@ from botsort.global_registry import GlobalRegistry
 
 registry = GlobalRegistry(
     match_threshold=0.3,
+    cross_match_threshold=0.5,
     min_frames=5,
     max_emb=50,
     emb_dim=256,
+    min_gap_frames=10,
+    intra_cam_gap=30,
+    w_appearance=0.5,
+    w_spatial=0.3,
+    w_time=0.2,
+    frame_w=1920,
+    frame_h=1080,
+    edge_margin=50,
 )
 
 _tracker_kwargs = dict(
@@ -225,7 +234,7 @@ def reid_pad_buffer_probe(pad, info, u_data):
         # frame reference and namespaces tids via cam_base = source_id * 100_000.
         for source_id, frame_meta in frame_meta_by_source.items():
             if source_id < len(trackers):
-                registry.step_source(
+                registry.step_source_hungarian(
                     trackers[source_id],
                     cam_idx=source_id,
                     frame_id=frame_meta.frame_num,
@@ -574,15 +583,10 @@ def main():
     pipeline.set_state(Gst.State.PLAYING)
 
     _pipeline_ref = pipeline
-    kb_thread = threading.Thread(target=_keyboard_listener, daemon=True, name="kb-listener")
-    kb_thread.start()
-    sys.stdout.write("Running...  [SPACE] to pause/resume\n")
     try:
         loop.run()
     except BaseException:
         pass
-    finally:
-        _kb_stop.set()
 
     sys.stdout.write("Returned, stopping playback\n")
     pipeline.set_state(Gst.State.NULL)
