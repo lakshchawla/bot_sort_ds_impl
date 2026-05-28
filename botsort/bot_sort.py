@@ -26,6 +26,7 @@ class STrack(BaseTrack):
 
         # wait activate
         self._tlwh = np.asarray(tlwh, dtype=np.float64)
+        self.is_touching_edge = obj_meta
         self.kalman_filter = None
         self.mean, self.covariance = None, None
         self.is_activated = False
@@ -79,25 +80,6 @@ class STrack(BaseTrack):
                     multi_mean[i][7] = 0
             multi_mean, multi_covariance = STrack.shared_kalman.multi_predict(multi_mean, multi_covariance)
             for i, (mean, cov) in enumerate(zip(multi_mean, multi_covariance)):
-                stracks[i].mean = mean
-                stracks[i].covariance = cov
-
-
-    @staticmethod
-    def multi_gmc(stracks, H=np.eye(2, 3)):
-        if len(stracks) > 0:
-            multi_mean = np.asarray([st.mean.copy() for st in stracks])
-            multi_covariance = np.asarray([st.covariance for st in stracks])
-
-            R = H[:2, :2]
-            R8x8 = np.kron(np.eye(4, dtype=float), R)
-            t = H[:2, 2]
-
-            for i, (mean, cov) in enumerate(zip(multi_mean, multi_covariance)):
-                mean = R8x8.dot(mean)
-                mean[:2] += t
-                cov = R8x8.dot(cov).dot(R8x8.transpose())
-
                 stracks[i].mean = mean
                 stracks[i].covariance = cov
 
@@ -240,7 +222,7 @@ class STrack(BaseTrack):
 class BoTSORT(object):
     def __init__(self, track_high_thresh=0.6, track_low_thresh=0.1, new_track_thresh=0.7, track_buffer=30, 
                 match_thresh=0.8, with_reid=True, proximity_thresh=0.5, appearance_thresh=0.4, euc_thresh=0.1, 
-                fuse_score=True, frame_rate=30, max_batch_size=8, map_len=None, real_data=True, registry = None):
+                fuse_score=True, frame_rate=30, max_batch_size=8, map_len=None, real_data=True, registry = None, frame_size =  (1920, 1080), roi_padding = (0,0)):
         self.tracked_stracks = []  # type: list[STrack]
         self.lost_stracks = []  # type: list[STrack]
 
@@ -275,6 +257,9 @@ class BoTSORT(object):
 
         self.id_assigner = ID_Assigner()
         self.registry = registry
+
+        self.frame_size = frame_size
+        self.roi_padding = roi_padding
         
         # self.encoder = FastReIDInterface('./reid/configs/AIC24/sbs_R50-ibn.yml', './pretrained/market_aic_sbs_R50-ibn.pth', 'cuda')
         # self.id_assigner = None
@@ -329,11 +314,8 @@ class BoTSORT(object):
             # pose_input = []
 
         if len(dets) > 0:
-            '''Detections'''
             if self.with_reid:
-                '''Extract embeddings '''
                 # features_keep = self.encoder.inference(img, dets)
-                
 
                 # pose_result = inference_topdown(pose, img, pose_input, bbox_format='xyxy')
                 # pose_result = np.array([np.concatenate([p.pred_instances.keypoints[0], np.expand_dims(p.pred_instances.keypoint_scores[0], axis=1)], axis=1) for p in pose_result])
@@ -431,7 +413,7 @@ class BoTSORT(object):
         # association the untrack to the low score detections
         if len(dets_second) > 0:
             '''Detections'''
-            detections_second = [STrack(STrack.tlbr_to_tlwh(tlbr), s) for
+            detections_second = [STrack(tlwh=STrack.tlbr_to_tlwh(tlbr), score=s) for
                                  (tlbr, s) in zip(dets_second, scores_second)]
         else:
             detections_second = []
@@ -482,7 +464,9 @@ class BoTSORT(object):
         for it in u_unconfirmed:
             track = unconfirmed[it]
             track.mark_removed()
-            removed_stracks.append(track)
+            
+            if track.t_global_id != 0:
+                removed_stracks.append(track)
 
         """ Step 4: Init new stracks"""
         for inew in u_detection:

@@ -238,6 +238,50 @@ class GlobalRegistry:
         if any(t.t_global_id != 0 for t in tracker.tracked_stracks):
             self._rebuild_faiss_index()
 
+    
+    def step_reid(self, trackers: list, frame_id: int):
+        combined_lost_stracks = []
+        combined_tracked_stracks = []
+        touching_edge = True
+        
+        for tracker in trackers: 
+            combined_lost_stracks.extend(tracker.lost_stracks)
+            combined_tracked_stracks.extend(tracker.tracked_stracks)
+
+        #    current_tids = {t.track_id for t in tracker.tracked_stracks} # in current frame
+        #    linked_tids = set(self._tid_to_gid.keys()) # owning a global id by the wrapper
+        #    unlinked_tids = linked_tids - current_tids # not owning one, ()
+
+        #    lost stracks edge filter
+        #    directional_exit: occlusion specific check.
+        #    query matching time_complexity
+
+        edge_lost = self._get_boundary_tracks(combined_lost_stracks) 
+        
+
+    @staticmethod
+    def _get_boundary_tracks(tracks, frame_w = 1920, frame_h = 1080, margin=20):
+      """
+      Returns tracks whose bounding box is within `margin` pixels of any frame edge.
+      tlwh = [top-left-x, top-left-y, width, height]
+      """
+      boundary = []
+      for track in tracks:
+          x, y, w, h = track.tlwh
+          x2, y2 = x + w, y + h
+
+          touching = (
+              x  <= margin        or   # left edge
+              y  <= margin        or   # top edge
+              x2 >= frame_w - margin or  # right edge
+              y2 >= frame_h - margin    # bottom edge
+          )
+          if touching:
+              boundary.append(track)
+      return boundary
+
+
+    
     def step_source(self, tracker, cam_idx: int, frame_id: int):
         """
         Per-source registry update for multi-camera DeepStream pipelines.
@@ -250,16 +294,16 @@ class GlobalRegistry:
 
         The existing step() method is unchanged and still works for single-cam.
         """
-        cam_base = cam_idx * 100_000
+        cam_base = (cam_idx + 1) * 1_000
 
-        # ── Deactivate tracks that left this camera's tracked_stracks ──────
+        # Deactivate tracks that left this camera's tracked_stracks 
         current_cam_tids = {cam_base + t.track_id for t in tracker.tracked_stracks}
         cam_linked       = {t for t in self._tid_to_gid
                             if cam_base <= t < cam_base + 100_000}
         for gone_tid in cam_linked - current_cam_tids:
             self.deactivate_track(gone_tid)
 
-        # ── Assign / update global IDs ────────────────────────────────────
+        # Assign / update global IDs 
         for track in tracker.tracked_stracks:
             cam_tid = cam_base + track.track_id
             feat    = track.smooth_feat

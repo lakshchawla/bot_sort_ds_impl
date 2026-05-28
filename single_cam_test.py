@@ -46,20 +46,80 @@ def draw_boxes_on_bg(bg_image, box_data, current_format="tlwh"):
 
     return bg_image
 
-# --- Path setup ---
+
+
+
+import av
+import numpy as np
+import time
+from IPython.display import display, Image as IPImage
+import io
+from PIL import Image
+
+
+def get_frame(video_path: str, target_frame_num: int) -> np.ndarray:
+    """
+    Fetch a specific frame from a video file with low latency.
+
+    Strategy (PyAV / FFmpeg):
+      1. Open the container once.
+      2. Compute the target PTS in stream time-base units.
+      3. Seek to the nearest *preceding keyframe* — FFmpeg jumps there
+         directly, skipping the entire prefix of the file.
+      4. Decode only the handful of frames between that keyframe and the
+         target — typically << 30 frames for modern encodings.
+
+    Returns
+    -------
+    np.ndarray  shape (H, W, 3), dtype uint8, BGR colour order (OpenCV-compatible).
+    """
+    container = av.open(video_path)
+    stream = container.streams.video[0]
+
+    # Enable multi-threaded decoding for speed
+    stream.thread_type = "AUTO"
+
+    fps       = float(stream.average_rate)          # e.g. 30.0
+    time_base = float(stream.time_base)             # e.g. 1/90000
+
+    # Target presentation timestamp in stream time-base units
+    target_sec       = target_frame_num / fps
+    target_timestamp = int(target_sec / time_base)
+
+    # Jump to nearest preceding keyframe (no 'whence' kwarg in this PyAV version)
+    container.seek(target_timestamp, backward=True, stream=stream)
+
+    img = None
+    for frame in container.decode(video=0):
+        # Compute frame index from PTS
+        pts_sec       = frame.pts * time_base
+        current_frame = int(round(pts_sec * fps))
+
+        if current_frame >= target_frame_num:
+            # Convert directly to a numpy BGR array (no PIL round-trip)
+            img = frame.to_ndarray(format="bgr24")
+            break
+
+    container.close()
+
+    if img is None:
+        raise ValueError(
+            f"Frame {target_frame_num} not found in '{video_path}'. "
+            f"Total frames ≈ {int(fps * float(stream.duration) * time_base) if stream.duration else '?'}"
+        )
+    return img
+
+
 path_to_botsort_parent = './'
 if path_to_botsort_parent not in sys.path:
     sys.path.append(path_to_botsort_parent)
 
-ROOT_FRAME_DIR = "/home/lab314/workspace/reid/ds_backend_reid/MCDPT/deepstream_npy_output2"
+ROOT_FRAME_DIR = "/home/lab314/workspace/reid/ds_backend_reid/MCDPT/deepstream_npy_output_videocutreid"
 # ROOT_FRAME_DIR = "/home/lab314/workspace/reid/ds_backend_reid/MCDPT/deepstream_npy_output"
 
 from botsort.bot_sort import BoTSORT
 from botsort.global_registry import GlobalRegistry
-from multicam_tracker.clustering import Clustering, ID_Distributor
-from multicam_tracker.cluster_track import MCTracker
 
-# --- Shared registry ---
 registry = GlobalRegistry(
     match_threshold=0.25,
     min_frames=5,
@@ -67,7 +127,6 @@ registry = GlobalRegistry(
     emb_dim=256,
 )
 
-# --- Static 2-camera tracker setup ---
 _tracker_kwargs = dict(
     track_high_thresh=0.6,
     track_low_thresh=0.1,
@@ -86,15 +145,13 @@ _tracker_kwargs = dict(
 )
 
 tracker1 = BoTSORT(**_tracker_kwargs)  # camera 0
-tracker2 = BoTSORT(**_tracker_kwargs)  # camera 1
 
-# tid_offset separates per-camera track IDs in the shared registry
 CAM1_TID_OFFSET = 0
-CAM2_TID_OFFSET = 100000
 
-# --- Main Processing Loop ---
 cur_frame     = 0
 ACTIVE_FORMAT = "tlwh"
+VIDEO_PATH = "/home/lab314/Videos/video_cut_reid.mp4"
+
 
 for i in range(3000):
     cur_frame += 1
@@ -106,65 +163,37 @@ for i in range(3000):
 
     frame_content = np.load(npy_path, allow_pickle=True)
 
-    if len(frame_content) < 2:
-        print(f"Frame {i}: only {len(frame_content)} camera(s), skipping")
-        continue
 
-    # ── Camera 0 detections ───────────────────────────────────────────────────
     detections1 = frame_content[0]['objects']
     for d in detections1:
         d['obj_meta'] = None
 
-    # ── Camera 1 detections ───────────────────────────────────────────────────
-    detections2 = frame_content[1]['objects']
-    for d in detections2:
-        d['obj_meta'] = None
-
-    # ── 1. Per-camera tracking ────────────────────────────────────────────────
     tracker1.update(detections1)
-    tracker2.update(detections2)
 
-    # ── 2. Global registry step — assigns/reuses t_global_id on each track ───
-    registry.step([tracker1, tracker2], frame_id=cur_frame)
+    # registry.step(tracker1, frame_id=cur_frame)
 
-    # ── 3. Collect tracks from both cameras for display ───────────────────────
     extracted_data1 = []
-    extracted_data2 = []
     for t in tracker1.tracked_stracks:
         if t.t_global_id != 0 and hasattr(t, 'tlwh'):
-            extracted_data1.append((t.tlwh, t.t_global_id))
-    for t in tracker2.tracked_stracks:
-        if t.t_global_id != 0 and hasattr(t, 'tlwh'):
-            extracted_data2.append((t.tlwh, t.t_global_id))
+            extracted_data1.append((t.tlwh, t.track_id))
 
-    # ── 4. Print ──────────────────────────────────────────────────────────────
-    cam1_gids = [t.t_global_id for t in tracker1.tracked_stracks]
-    cam2_gids = [t.t_global_id for t in tracker2.tracked_stracks]
-    print(f"frame {i:04d}  cam1_gids={cam1_gids}  cam2_gids={cam2_gids}  registry={registry}")
+    # cam1_gids = [t.t_global_id for t in tracker1.tracked_stracks]
+    # print(f"frame {i:04d}  cam1_gids={cam1_gids}   registry={registry}")
 
-    # ── 5. Visualise ──────────────────────────────────────────────────────────
+    # bg_frame1 = get_frame(VIDEO_PATH, frame_content[0]['frame_id'])
     bg_frame1 = np.zeros((1080, 1920, 3), dtype=np.uint8)
-    bg_frame2 = np.zeros((1080, 1920, 3), dtype=np.uint8)
+
     if extracted_data1:
         formatted = convert_boxes(extracted_data1, to_format=ACTIVE_FORMAT)
         bg_frame1  = draw_boxes_on_bg(bg_frame1, formatted, current_format=ACTIVE_FORMAT)
 
-    if extracted_data2:
-        formatted = convert_boxes(extracted_data2, to_format=ACTIVE_FORMAT)
-        bg_frame2  = draw_boxes_on_bg(bg_frame2, formatted, current_format=ACTIVE_FORMAT)
-
     
     bg_frame1 = cv2.resize(bg_frame1, (0, 0), fx=1/2, fy=1/2)
-    bg_frame2 = cv2.resize(bg_frame2, (0, 0), fx=1/2, fy=1/2)
-
-
-    combined = np.hstack((bg_frame1, bg_frame2))
-    cv2.imshow("Detections - 1", combined)
+    cv2.imshow("Detections - 1", bg_frame1)
     cv2.waitKey(0)
 
 cv2.destroyAllWindows()
 
-# ── Final registry dump ───────────────────────────────────────────────────────
 print("\n=== Final Gallery ===")
 for e in registry.get_all_entries():
     print(e)

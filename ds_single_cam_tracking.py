@@ -205,7 +205,6 @@ def reid_pad_buffer_probe(pad, info, u_data):
             is_touching_edge = obj_meta.rect_params.left <= 0 or obj_meta.rect_params.top <= 0 or obj_meta.rect_params.left + obj_meta.rect_params.width >= 1900 or obj_meta.rect_params.top + obj_meta.rect_params.height >= 1060
 
             detections.append({
-                "obj_meta": l_obj.data,
                 "bbox": np.array([
                     obj_meta.rect_params.left,
                     obj_meta.rect_params.top,
@@ -213,6 +212,8 @@ def reid_pad_buffer_probe(pad, info, u_data):
                     obj_meta.rect_params.height
                 ], dtype=np.float32),
                 "det_confidence": 0.0 if is_touching_edge else obj_meta.confidence,
+                # change @BOTSORT if touching_edge, track using IOU but dont input anymore reidentification_features
+                "obj_meta": is_touching_edge,
                 "reid_vector": reid_vector
             })
             obj_meta_list.append(obj_meta)
@@ -224,7 +225,7 @@ def reid_pad_buffer_probe(pad, info, u_data):
             all_tracks= tracker.update(detections)
             print()
         with nvtx.annotate("registry_step", color="purple"):
-            registry.step(tracker, frame_id=cur_frame)
+            registry.step_reid([tracker], frame_id=cur_frame)
 
 
         # all_tracks = mct.get_tracked_objects()
@@ -352,6 +353,8 @@ def save_dets_pad_buffer_probe(pad, info, u_data):
             except StopIteration:
                 break
 
+            is_touching_edge = obj_meta.rect_params.left <= 0 or obj_meta.rect_params.top <= 0 or obj_meta.rect_params.left + obj_meta.rect_params.width >= 1900 or obj_meta.rect_params.top + obj_meta.rect_params.height >= 1060
+            
             obj_dict = {
                 "obj_meta": None,
                 "local_track_id": obj_meta.object_id,
@@ -362,6 +365,7 @@ def save_dets_pad_buffer_probe(pad, info, u_data):
                     obj_meta.rect_params.height
                 ], dtype=np.float32),
                 "det_confidence": obj_meta.confidence,
+                "is_touching_edge": is_touching_edge,
                 "reid_vector": None
             }
 
@@ -399,7 +403,7 @@ def save_dets_pad_buffer_probe(pad, info, u_data):
         starting_frame = array_of_frames[0]["frame_id"]
         
         # 2. Define your output directory and ensure it exists
-        save_dir = "/home/lab314/workspace/reid/ds_backend_reid/MCDPT/deepstream_npy_output_videocutreid"
+        save_dir = "/home/lab314/workspace/reid/ds_backend_reid/MCDPT/test"
         os.makedirs(save_dir, exist_ok=True)
         
         # 3. Create a unique filename for this batch
@@ -565,6 +569,8 @@ def main():
     if 'width' in tiler_config: tiler.set_property('width', tiler_config['width'])
     if 'height' in tiler_config: tiler.set_property('height', tiler_config['height'])
 
+    tiler.set_property("width", 960 if num_sources == 1 else 1920)
+
     if PERF_MODE:
         if is_aarch64:
             streammux.set_property("nvbuf-memory-type", 4)
@@ -589,7 +595,7 @@ def main():
         if not reid_sgie_pad:
             sys.stderr.write("Could not get nvdslogger src pad. Exiting.\n")
             return -1
-        reid_sgie_pad.add_probe(Gst.PadProbeType.BUFFER, save_dets_pad_buffer_probe, 0)
+        reid_sgie_pad.add_probe(Gst.PadProbeType.BUFFER, reid_pad_buffer_probe, 0)
 
     pipeline.set_state(Gst.State.PLAYING)
 

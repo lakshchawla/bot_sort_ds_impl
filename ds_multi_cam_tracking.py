@@ -574,15 +574,10 @@ def main():
     pipeline.set_state(Gst.State.PLAYING)
 
     _pipeline_ref = pipeline
-    kb_thread = threading.Thread(target=_keyboard_listener, daemon=True, name="kb-listener")
-    kb_thread.start()
-    sys.stdout.write("Running...  [SPACE] to pause/resume\n")
     try:
         loop.run()
     except BaseException:
         pass
-    finally:
-        _kb_stop.set()
 
     sys.stdout.write("Returned, stopping playback\n")
     pipeline.set_state(Gst.State.NULL)
