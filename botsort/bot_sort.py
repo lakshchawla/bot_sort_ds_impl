@@ -10,7 +10,6 @@ import pdb
 import sys
 import math
 
-
 class ID_Assigner:
     def __init__(self, init_id=0):
         self.cur_id = init_id
@@ -117,6 +116,7 @@ class STrack(BaseTrack):
         self.pose = new_track.pose
         self.num_kpts = new_track.num_kpts
         self.img_path = new_track.img_path
+        self.is_touching_edge = new_track.is_touching_edge
 
         self.centroid = self.tlwh_to_xywh(new_track.tlwh)[:2]
 
@@ -135,6 +135,9 @@ class STrack(BaseTrack):
 
         self.mean, self.covariance = self.kalman_filter.update(self.mean, self.covariance, self.tlwh_to_xywh(new_tlwh))
 
+        ''' only suitable for reid wrapper '''
+        # if new_track.curr_feat is not None and not new_track.is_touching_edge:
+            
         if new_track.curr_feat is not None:
             self.update_features(new_track.curr_feat)
 
@@ -145,6 +148,7 @@ class STrack(BaseTrack):
         self.pose = new_track.pose
         self.num_kpts = new_track.num_kpts
         self.img_path = new_track.img_path
+        self.is_touching_edge = new_track.is_touching_edge
 
         self.centroid = self.tlwh_to_xywh(new_track.tlwh)[:2]
 
@@ -220,12 +224,14 @@ class STrack(BaseTrack):
 
 
 class BoTSORT(object):
-    def __init__(self, track_high_thresh=0.6, track_low_thresh=0.1, new_track_thresh=0.7, track_buffer=30, 
+    def __init__(self, cam_source = 1, track_high_thresh=0.6, track_low_thresh=0.1, new_track_thresh=0.7, track_buffer=30, 
                 match_thresh=0.8, with_reid=True, proximity_thresh=0.5, appearance_thresh=0.4, euc_thresh=0.1, 
                 fuse_score=True, frame_rate=30, max_batch_size=8, map_len=None, real_data=True, registry = None, frame_size =  (1920, 1080), roi_padding = (0,0)):
-        self.tracked_stracks = []  # type: list[STrack]
+        self.tracked_stracks = []  
         self.lost_stracks = []  # type: list[STrack]
 
+        self.cam_source = cam_source
+        
         # check viability of removed stracks + filter for removed tracks
         self.removed_stracks = []  # type: list[STrack]
         
@@ -239,7 +245,7 @@ class BoTSORT(object):
 
         self.buffer_size = int(frame_rate / 30.0 * track_buffer)
         # self.max_time_lost = self.buffer_size
-        self.max_time_lost = 2000
+        self.max_time_lost = 300
         self.kalman_filter = KalmanFilter()
 
         self.match_thresh = match_thresh
@@ -255,7 +261,7 @@ class BoTSORT(object):
 
         self.max_len = map_len if map_len else np.sqrt(1920**2 + 1080**2)
 
-        self.id_assigner = ID_Assigner()
+        self.id_assigner = ID_Assigner(init_id=cam_source * 1_000)
         self.registry = registry
 
         self.frame_size = frame_size
@@ -274,9 +280,9 @@ class BoTSORT(object):
         
         
         
-        print(f"[BS] Tracked Stracks\t{[(track.t_global_id, track.track_id) for track in self.tracked_stracks]}")
-        print(f"[BS] Lost Stracks\t{[(track.t_global_id, track.track_id) for track in self.lost_stracks]}")
-        print(f"[BS] Removed Strack\t{[(track.t_global_id, track.track_id) for track in self.removed_stracks]}")
+        # print(f"[BS] Tracked Stracks\t{[(track.t_global_id, track.track_id) for track in self.tracked_stracks]}")
+        # print(f"[BS] Lost Stracks\t{[(track.t_global_id, track.track_id) for track in self.lost_stracks]}")
+        # print(f"[BS] Removed Strack\t{[(track.t_global_id, track.track_id) for track in self.removed_stracks]}")
 
         if len(output_results):
             scores = np.array([d['det_confidence'] for d in output_results])

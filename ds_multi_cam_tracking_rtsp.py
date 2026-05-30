@@ -17,22 +17,18 @@ import numpy as np
 import time
 import threading
 from collections import defaultdict
+import nvtx
 
 from glob import glob
 
-path_to_botsort_parent = '/home/lab314/workspace/reid/botsort-tracker'
+path_to_botsort_parent = '/home/lakshh/workspace/reid/botsort-tracker'
 
 if path_to_botsort_parent not in sys.path:
     sys.path.append(path_to_botsort_parent)
  
 from botsort.bot_sort import BoTSORT
-from botsort.mc_tracker import MCTracker
 from botsort.global_registry import GlobalRegistry
 
-
-FRAME_W          = 1920
-FRAME_H          = 1080
-BOUNDARY_MARGIN  = 20   # pixels — must match MCTracker boundary_margin
 
 registry = GlobalRegistry(
     match_threshold=0.3,
@@ -41,13 +37,7 @@ registry = GlobalRegistry(
     emb_dim=256,
 )
 
-mct = MCTracker(
-    registry=registry,
-    frame_size=(FRAME_W, FRAME_H),
-    boundary_margin=BOUNDARY_MARGIN,
-)
-
-tracker = BoTSORT(
+_tracker_kwargs = dict(
     track_high_thresh=0.6,
     track_low_thresh=0.1,
     new_track_thresh=0.3,
@@ -63,12 +53,55 @@ tracker = BoTSORT(
     map_len=None,
     real_data=True,
     registry=registry,
-    # frame_width=1920,
-    # frame_height=1080,
 )
 
+tracker0 = BoTSORT(
+    cam_source=1,
+    track_high_thresh=0.6,
+    track_low_thresh=0.1,
+    new_track_thresh=0.3,
+    track_buffer=600,
+    match_thresh=0.8,
+    with_reid=True,
+    proximity_thresh=0.5,
+    appearance_thresh=0.2,
+    euc_thresh=0.1,
+    fuse_score=True,
+    frame_rate=30,
+    max_batch_size=8,
+    map_len=None,
+    real_data=True,
+    registry=registry,)  # camera source_id 0
+tracker1 = BoTSORT(
+    cam_source=2,
+    track_high_thresh=0.6,
+    track_low_thresh=0.1,
+    new_track_thresh=0.3,
+    track_buffer=600,
+    match_thresh=0.8,
+    with_reid=True,
+    proximity_thresh=0.5,
+    appearance_thresh=0.2,
+    euc_thresh=0.1,
+    fuse_score=True,
+    frame_rate=30,
+    max_batch_size=8,
+    map_len=None,
+    real_data=True,
+    registry=registry)  # camera source_id 1
+
+from botsort.mc_tracker import MCTracker
+
+mct = MCTracker(
+    registry=registry,
+    frame_size=(1920, 1080),
+    boundary_margin=20,
+)
+
+trackers = [tracker0, tracker1]
 
 PERF_MODE = os.environ.get("NVDS_TEST3_PERF_MODE") == "1"
+
 cur_frame  = 0
 ACTIVE_FORMAT = "tlwh"
 
@@ -100,12 +133,12 @@ def cb_newpad(decodebin, decoder_src_pad, data):
         caps = decoder_src_pad.query_caps(None)
     gststruct = caps.get_structure(0)
     gstname = gststruct.get_name()
-    source_bin = data
+    multi_src_bin = data
     features = caps.get_features(0)
 
     if gstname.find("video") != -1:
         if features.contains("memory:NVMM"):
-            bin_ghost_pad = source_bin.get_static_pad("src")
+            bin_ghost_pad = multi_src_bin.get_static_pad("src")
             if not bin_ghost_pad.set_target(decoder_src_pad):
                 sys.stderr.write("Failed to link decoder src pad to source bin ghost pad\n")
         else:
@@ -123,18 +156,10 @@ def create_source_bin(index, uri):
     bin_name = f"source-bin-{index:02d}"
     nbin = Gst.Bin.new(bin_name)
 
-    if PERF_MODE:
-        uri_decode_bin = Gst.ElementFactory.make("nvurisrcbin", "uri-decode-bin")
-        uri_decode_bin.set_property("file-loop", True)
-        uri_decode_bin.set_property("cudadec-memtype", 0)
-    else:
-        uri_decode_bin = Gst.ElementFactory.make("uridecodebin", "uri-decode-bin")
 
-    if not nbin or not uri_decode_bin:
-        sys.stderr.write("One element in source bin could not be created.\n")
-        return None
+    uri_decode_bin = Gst.ElementFactory.make("nvmultiurisrcbin", "uri-decode-bin")
 
-    uri_decode_bin.set_property("uri", uri)
+    uri_decode_bin.set_property("uri-list", uri)
     uri_decode_bin.connect("pad-added", cb_newpad, nbin)
     uri_decode_bin.connect("child-added", decodebin_child_added, nbin)
 
@@ -146,9 +171,6 @@ def create_source_bin(index, uri):
 
     return nbin
 
-import nvtx
-
-
 @nvtx.annotate("reid_probe", color="blue")
 def reid_pad_buffer_probe(pad, info, u_data):
     gst_buffer = info.get_buffer()
@@ -156,8 +178,12 @@ def reid_pad_buffer_probe(pad, info, u_data):
         return Gst.PadProbeReturn.OK
 
     batch_meta = pyds.gst_buffer_get_nvds_batch_meta(hash(gst_buffer))
-    array_of_frames = []
 
+    # ── Pass 1: collect detections and frame_meta refs for every source ──
+    detections_by_source: dict[int, list] = defaultdict(list)
+    frame_meta_by_source: dict[int, object] = {}
+
+    nvtx.push_range("build_detections", color="green")
     l_frame = batch_meta.frame_meta_list
     while l_frame is not None:
         try:
@@ -165,22 +191,18 @@ def reid_pad_buffer_probe(pad, info, u_data):
         except StopIteration:
             break
 
-        # --- Step 1: Build detections list (mirrors dummy script format) ---
-        detections = []
-        obj_meta_list = []  # parallel list to detections, same index order
+        source_id = frame_meta.source_id
+        frame_meta_by_source[source_id] = frame_meta
 
-        nvtx.push_range("build_detections", color="green")
         l_obj = frame_meta.obj_meta_list
         while l_obj is not None:
             try:
                 obj_meta = pyds.NvDsObjectMeta.cast(l_obj.data)
-                # print(sys.getsizeof(l_obj.data)) 
-                # print(sys.getsizeof(hash(obj_meta))) 
             except StopIteration:
                 break
 
             obj_meta.rect_params.border_color.set(0.0, 0.0, 1.0, 1.0)
-            obj_meta.rect_params.border_width = 1 
+            obj_meta.rect_params.border_width = 1
             obj_meta.text_params.display_text = ""
             reid_vector = None
 
@@ -196,63 +218,71 @@ def reid_pad_buffer_probe(pad, info, u_data):
                     tensor_meta = pyds.NvDsInferTensorMeta.cast(user_meta.user_meta_data)
                     layer = pyds.get_nvds_LayerInfo(tensor_meta, 0)
                     ptr = ctypes.cast(pyds.get_ptr(layer.buffer), ctypes.POINTER(ctypes.c_float))
-
                     embed_len = 1
                     for i in range(layer.inferDims.numDims):
                         embed_len *= layer.inferDims.d[i]
-
                     reid_vector = np.copy(np.ctypeslib.as_array(ptr, shape=(embed_len,)))
 
                 l_user = l_user.next
             nvtx.pop_range()  # reid_extract
 
-            # print(frame_meta.source_frame_width, frame_meta.source_frame_height)
-            # if (obj_meta.rect_params.left == 0 or 
-            #     obj_meta.rect_params.top == 0 or
-            #     obj_meta.rect_params.width + obj_meta.rect_params.left ==  or
-            #     obj_meta.rect_params.top + obj_meta.rect_params.height == 1080):
-            #     print("obj non det")
-            
             is_touching_edge = (
-                obj_meta.rect_params.left                                  <= BOUNDARY_MARGIN or
-                obj_meta.rect_params.top                                   <= BOUNDARY_MARGIN or
-                obj_meta.rect_params.left + obj_meta.rect_params.width     >= FRAME_W - BOUNDARY_MARGIN or
-                obj_meta.rect_params.top  + obj_meta.rect_params.height    >= FRAME_H - BOUNDARY_MARGIN
+                obj_meta.rect_params.left <= 0
+                or obj_meta.rect_params.top <= 0
+                or obj_meta.rect_params.left + obj_meta.rect_params.width >= 1900
+                or obj_meta.rect_params.top + obj_meta.rect_params.height >= 1060
             )
-
-            detections.append({
+            det = {
+                "obj_meta": l_obj.data,
                 "bbox": np.array([
                     obj_meta.rect_params.left,
                     obj_meta.rect_params.top,
                     obj_meta.rect_params.width,
-                    obj_meta.rect_params.height
+                    obj_meta.rect_params.height,
                 ], dtype=np.float32),
-                "det_confidence": obj_meta.confidence,
-                # change @BOTSORT if touching_edge, track using IOU but dont input anymore reidentification_features
-                "obj_meta": is_touching_edge,
-                "reid_vector": reid_vector
-            })
-            obj_meta_list.append(obj_meta)
-
+                "det_confidence": 0.0 if is_touching_edge else obj_meta.confidence,
+                "reid_vector": reid_vector,
+            }
+            detections_by_source[source_id].append(det)
             l_obj = l_obj.next
-        nvtx.pop_range()  # build_detections
 
-        with nvtx.annotate("tracker_update", color="red"):
-            all_tracks= tracker.update(detections)
-            
-            mct.update_global(trackers=[tracker])
-            
-        # with nvtx.annotate("registry_step", color="purple"):
-            # registry.step(tracker, frame_id=cur_frame)
-            # registry.step_reid([tracker], frame_id=cur_frame)
+        l_frame = l_frame.next
+    nvtx.pop_range() 
 
+    all_tracks_by_source: dict[int, list] = {}
+    with nvtx.annotate("tracker_update", color="red"):
+        # Iterate frame_meta_by_source so sources with zero detections in this
+        # batch still advance their tracker (marks tracks lost over time).
+        for source_id, frame_meta in frame_meta_by_source.items():
+            if source_id < len(trackers):
+                dets   = detections_by_source.get(source_id, [])
+                tracks = trackers[source_id].update(dets)
+                all_tracks_by_source[source_id] = tracks
 
-        # all_tracks = mct.get_tracked_objects()
-        nvtx.push_range("build_display_meta", color="cyan")
-       
-        extracted_data = []
+    # print()
 
-        MAX_DISPLAY_SLOTS = 16  # MAX_ELEMENTS_IN_DISPLAY_META
+    with nvtx.annotate("registry_step", color="purple"):
+        # Per-source async update: uses frame_meta.frame_num as the per-stream
+        # frame reference and namespaces tids via cam_base = source_id * 100_000.
+        # for source_id, frame_meta in frame_meta_by_source.items():
+        #     if source_id < len(trackers):
+        #         registry.step_source(
+        #             trackers[source_id],
+        #             cam_idx=source_id,
+        #             frame_id=frame_meta.frame_num,
+        #         )
+        
+        mct.update_global(trackers=trackers)
+        
+        
+
+    nvtx.push_range("build_display_meta", color="cyan")
+    MAX_DISPLAY_SLOTS = 16
+    for source_id, all_tracks in all_tracks_by_source.items():
+        frame_meta = frame_meta_by_source.get(source_id)
+        if frame_meta is None:
+            continue
+
         display_meta = pyds.nvds_acquire_display_meta_from_pool(batch_meta)
         slot = 0
 
@@ -274,7 +304,7 @@ def reid_pad_buffer_probe(pad, info, u_data):
             rect_params.has_bg_color = 0
 
             text_params = display_meta.text_params[slot]
-            text_params.display_text = f"g{t.t_global_id} | t{t.track_id}"
+            text_params.display_text = f"G{t.t_global_id} L{t.track_id}"
             text_params.x_offset = max(0, int(t.tlwh[0]))
             text_params.y_offset = max(0, int(t.tlwh[1]))
             text_params.font_params.font_name = "Serif"
@@ -282,10 +312,8 @@ def reid_pad_buffer_probe(pad, info, u_data):
             text_params.font_params.font_color.set(1.0, 1.0, 1.0, 1.0)
             text_params.set_bg_clr = 1
             text_params.text_bg_clr.set(0.0, 0.0, 0.0, 0.7)
-
             slot += 1
 
-        # Summary label needs one extra label slot; acquire a new display_meta if full
         if slot >= MAX_DISPLAY_SLOTS:
             display_meta.num_rects = MAX_DISPLAY_SLOTS
             display_meta.num_labels = MAX_DISPLAY_SLOTS
@@ -295,63 +323,20 @@ def reid_pad_buffer_probe(pad, info, u_data):
 
         display_meta.num_rects = slot
         display_meta.num_labels = slot + 1
-
-        py_nvosd_text_params = display_meta.text_params[slot]
-        py_nvosd_text_params.display_text = f"Global IDs {extracted_data}"
-        py_nvosd_text_params.x_offset = 10
-        py_nvosd_text_params.y_offset = 12
-        py_nvosd_text_params.font_params.font_name = "Serif"
-        py_nvosd_text_params.font_params.font_size = 10
-        py_nvosd_text_params.font_params.font_color.set(1.0, 1.0, 1.0, 1.0)
-        py_nvosd_text_params.set_bg_clr = 1
-        py_nvosd_text_params.text_bg_clr.set(0.0, 0.0, 0.0, 1.0)
-
+        summary = display_meta.text_params[slot]
+        summary.display_text = f"Cam{source_id} active={len(all_tracks)}"
+        summary.x_offset = 10
+        summary.y_offset = 12
+        summary.font_params.font_name = "Serif"
+        summary.font_params.font_size = 10
+        summary.font_params.font_color.set(1.0, 1.0, 1.0, 1.0)
+        summary.set_bg_clr = 1
+        summary.text_bg_clr.set(0.0, 0.0, 0.0, 1.0)
         pyds.nvds_add_display_meta_to_frame(frame_meta, display_meta)
 
-        # Draw the four ROI boundary lines (yellow dashes at BOUNDARY_MARGIN from each edge)
-        roi_meta = pyds.nvds_acquire_display_meta_from_pool(batch_meta)
-        m = BOUNDARY_MARGIN
-        roi_lines = [
-            (m,           0,            m,           FRAME_H),       # left
-            (FRAME_W - m, 0,            FRAME_W - m, FRAME_H),       # right
-            (0,           m,            FRAME_W,     m),              # top
-            (0,           FRAME_H - m,  FRAME_W,     FRAME_H - m),   # bottom
-        ]
-        roi_meta.num_lines = len(roi_lines)
-        for i, (x1, y1, x2, y2) in enumerate(roi_lines):
-            lp = roi_meta.line_params[i]
-            lp.x1 = x1;  lp.y1 = y1
-            lp.x2 = x2;  lp.y2 = y2
-            lp.line_width = 2
-            lp.line_color.set(1.0, 1.0, 0.0, 0.8)   # yellow
-        pyds.nvds_add_display_meta_to_frame(frame_meta, roi_meta)
-
-        nvtx.pop_range()  # build_display_meta
+    nvtx.pop_range()  # build_display_meta
 
 
-        # for t in tracker.tracked_stracks:
-        #     best_idx = None
-        #     best_dist = float('inf')
-        #     for idx, det in enumerate(detections):
-        #         dist = np.linalg.norm(t.tlwh - det["bbox"])
-        #         if dist < best_dist:
-        #             best_dist = dist
-        #             best_idx = idx
-
-        #     if best_idx is not None and best_dist < 50:
-        #         obj_meta_list[best_idx].misc_obj_info[0] = t.t_global_id
-
-
-        # for t in tracker.tracked_stracks:
-        #     # best_idx = None
-        #     try:
-        #         obj_meta = pyds.NvDsObjectMeta.cast(t.curr_obj_meta_ref)
-        #         obj_meta.object_id = t.t_global_id
-        #         obj_meta.text_params.display_text = f"ReID:{t.t_global_id}"
-        #     except StopIteration:
-        #         continue
-        array_of_frames.append(detections)
-        l_frame = l_frame.next
     if False:
         starting_frame = array_of_frames[0]["frame_id"]
         save_dir = "deepstream_npy_output"
@@ -391,13 +376,6 @@ def save_dets_pad_buffer_probe(pad, info, u_data):
             except StopIteration:
                 break
 
-            is_touching_edge = (
-                obj_meta.rect_params.left                                  <= BOUNDARY_MARGIN or
-                obj_meta.rect_params.top                                   <= BOUNDARY_MARGIN or
-                obj_meta.rect_params.left + obj_meta.rect_params.width     >= FRAME_W - BOUNDARY_MARGIN or
-                obj_meta.rect_params.top  + obj_meta.rect_params.height    >= FRAME_H - BOUNDARY_MARGIN
-            )
-
             obj_dict = {
                 "obj_meta": None,
                 "local_track_id": obj_meta.object_id,
@@ -408,7 +386,6 @@ def save_dets_pad_buffer_probe(pad, info, u_data):
                     obj_meta.rect_params.height
                 ], dtype=np.float32),
                 "det_confidence": obj_meta.confidence,
-                "is_touching_edge": is_touching_edge,
                 "reid_vector": None
             }
 
@@ -446,7 +423,7 @@ def save_dets_pad_buffer_probe(pad, info, u_data):
         starting_frame = array_of_frames[0]["frame_id"]
         
         # 2. Define your output directory and ensure it exists
-        save_dir = "/home/lab314/workspace/reid/ds_backend_reid/MCDPT/test"
+        save_dir = "/home/lakshh/workspace/reid/ds_backend_reid/MCDPT/deepstream_npy_output2"
         os.makedirs(save_dir, exist_ok=True)
         
         # 3. Create a unique filename for this batch
@@ -458,39 +435,6 @@ def save_dets_pad_buffer_probe(pad, info, u_data):
         np.save(filename, np_data)
 
     return Gst.PadProbeReturn.OK
-
-# ---------------------------------------------------------------------------
-# Play / Pause (SPACE key)
-# ---------------------------------------------------------------------------
-_paused       = False
-_pipeline_ref = None          # set in main() after pipeline is built
-_kb_stop      = threading.Event()
-
-def _keyboard_listener():
-    """Background daemon thread: toggles play/pause on SPACE keypress."""
-    global _paused, _pipeline_ref
-    fd = sys.stdin.fileno()
-    old_settings = termios.tcgetattr(fd)
-    try:
-        tty.setcbreak(fd)          # chars available immediately; Ctrl-C still works
-        while not _kb_stop.is_set():
-            r, _, _ = select.select([sys.stdin], [], [], 0.2)  # 200 ms poll
-            if r:
-                ch = sys.stdin.read(1)
-                if ch == ' ' and _pipeline_ref is not None:
-                    _paused = not _paused
-                    if _paused:
-                        _pipeline_ref.set_state(Gst.State.PAUSED)
-                        sys.stdout.write("\n[PAUSED]  Press SPACE to resume\n")
-                    else:
-                        _pipeline_ref.set_state(Gst.State.PLAYING)
-                        sys.stdout.write("\n[PLAYING]\n")
-                    sys.stdout.flush()
-    except Exception:
-        pass
-    finally:
-        termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
-# ---------------------------------------------------------------------------
 
 def main():
     global _pipeline_ref
@@ -506,43 +450,71 @@ def main():
 
     loop = GLib.MainLoop()
     pipeline = Gst.Pipeline.new("dstest3-pipeline")
-    streammux = Gst.ElementFactory.make("nvstreammux", "stream-muxer")
-    pipeline.add(streammux)
+
+
+    # streammux = Gst.ElementFactory.make("nvstreammux", "stream-muxer")
+    # pipeline.add(streammux)
 
     # Parse Source List
-    source_list_config = config.get('source-list', {})
-    sources = []
-    for key, value in source_list_config.items():
-        if key.startswith('list'):
-            if isinstance(value, str):
-                sources.extend(value.split(';'))
-            elif isinstance(value, list):
-                sources.extend(value)
-    sources = [s for s in sources if s]
+    # source_list_config = config.get('source-list', {})
+    # sources = []
+    # for key, value in source_list_config.items():
+    #     if key.startswith('list'):
+    #         if isinstance(value, str):
+    #             sources.extend(value.split(';'))
+    #         elif isinstance(value, list):
+    #             sources.extend(value)
+    # sources = [s for s in sources if s]
 
-    num_sources = len(sources)
-    for i, uri in enumerate(sources):
-        sys.stdout.write(f"Now playing : {uri}\n")
-        source_bin = create_source_bin(i, uri)
-        if not source_bin:
-            sys.stderr.write("Failed to create source bin. Exiting.\n")
-            return -1
+    # for i, uri in enumerate(sources):
+    #     sys.stdout.write(f"Now playing : {uri}\n")
+    #     multi_src_bin = create_source_bin(i, uri)
+    #     if not multi_src_bin:
+    #         sys.stderr.write("Failed to create source bin. Exiting.\n")
+    #         return -1
 
-        pipeline.add(source_bin)
-        pad_name = f"sink_{i}"
-        sinkpad = streammux.request_pad_simple(pad_name)
-        if not sinkpad:
-            sys.stderr.write("Streammux request sink pad failed. Exiting.\n")
-            return -1
+    #     pipeline.add(multi_src_bin)
+    #     pad_name = f"sink_{i}"
+    #     sinkpad = streammux.request_pad_simple(pad_name)
+    #     if not sinkpad:
+    #         sys.stderr.write("Streammux request sink pad failed. Exiting.\n")
+    #         return -1
 
-        srcpad = source_bin.get_static_pad("src")
-        if not srcpad:
-            sys.stderr.write("Failed to get src pad of source bin. Exiting.\n")
-            return -1
+    #     srcpad = multi_src_bin.get_static_pad("src")
+    #     if not srcpad:
+    #         sys.stderr.write("Failed to get src pad of source bin. Exiting.\n")
+    #         return -1
 
-        if srcpad.link(sinkpad) != Gst.PadLinkReturn.OK:
-            sys.stderr.write("Failed to link source bin to stream muxer. Exiting.\n")
-            return -1
+    #     if srcpad.link(sinkpad) != Gst.PadLinkReturn.OK:
+    #         sys.stderr.write("Failed to link source bin to stream muxer. Exiting.\n")
+    #         return -1
+
+    # multi_src_bin = Gst.ElementFactory.make("nvmultiurisrcbin", "src-bin")
+
+
+    multi_src_bin = Gst.ElementFactory.make("nvmultiurisrcbin", "multi-uri-source")
+
+    if not multi_src_bin:
+        print('cannot create')
+        return
+
+
+    multi_src_bin.set_property("uri-list", "file:///home/lakshh/Desktop/camera2_20260525_154131.mp4,file:///home/lakshh/Desktop/camera1_trim_20260525_154131.mp4")
+    # multi_src_bin.set_property("uri-list", "rtsp://root:root@192.168.6.91/cam1/h264,rtsp://root:root@192.168.6.90/cam1/h264")
+    num_sources = 2
+    multi_src_bin.set_property("max-batch-size", 10)
+    # multi_src_bin.set_property("batch-size", 1)
+    # multi_src_bin.set_property("batched-push-timeout", 66666)
+
+    multi_src_bin.set_property("ip-address", "localhost")
+    multi_src_bin.set_property("port", 9000)
+
+    # ADD THESE LINES: Define the uniform output resolution for the muxer
+    multi_src_bin.set_property("width", 1920)
+    multi_src_bin.set_property("height", 1080)
+
+    pipeline.add(multi_src_bin)
+
 
     pgie = Gst.ElementFactory.make("nvinfer", "primary-nvinference-engine")
     sgie1 = Gst.ElementFactory.make("nvinfer", "secondary-nvinference-engine-1")
@@ -556,7 +528,8 @@ def main():
 
     nvdslogger = Gst.ElementFactory.make("nvdslogger", "nvdslogger")
     tiler = Gst.ElementFactory.make("nvmultistreamtiler", "nvtiler")
-    nvvidconv = Gst.ElementFactory.make("nvvideoconvert", "nvvideo-converter")
+    nvvidconv1 = Gst.ElementFactory.make("nvvideoconvert", "nvvideo-converter-1")
+    nvvidconv2 = Gst.ElementFactory.make("nvvideoconvert", "nvvideo-converter-2")
     nvosd = Gst.ElementFactory.make("nvdsosd", "nv-onscreendisplay")
 
     is_aarch64 = platform.uname().machine == 'aarch64'
@@ -569,15 +542,15 @@ def main():
         else:
             sink = Gst.ElementFactory.make("nveglglessink", "nvvideo-renderer")
 
-    if not (pgie and sgie1 and nvdslogger and tiler and nvvidconv and nvosd and sink):
+    if not (pgie and sgie1 and nvdslogger and tiler and nvvidconv1 and nvvidconv2 and nvosd and sink):
         sys.stderr.write("One element could not be created. Exiting.\n")
         return -1
 
-    streammux_config = config.get('streammux', {})
-    if 'width' in streammux_config: streammux.set_property('width', streammux_config['width'])
-    if 'height' in streammux_config: streammux.set_property('height', streammux_config['height'])
-    if 'batch-size' in streammux_config: streammux.set_property('batch-size', streammux_config['batch-size'])
-    if 'batched-push-timeout' in streammux_config: streammux.set_property('batched-push-timeout', streammux_config['batched-push-timeout'])
+    # streammux_config = config.get('streammux', {})
+    # if 'width' in streammux_config: streammux.set_property('width', streammux_config['width'])
+    # if 'height' in streammux_config: streammux.set_property('height', streammux_config['height'])
+    # if 'batch-size' in streammux_config: streammux.set_property('batch-size', streammux_config['batch-size'])
+
 
     pgie_config = config.get('primary-gie', {})
     pgie_config_path = pgie_config.get('config-file') or pgie_config.get('config-file-path')
@@ -589,7 +562,6 @@ def main():
     if sgie1_config_path:
         sgie1.set_property('config-file-path', sgie1_config_path)
 
-    # Batch size override
     pgie_batch_size = pgie.get_property("batch-size")
     if pgie_batch_size != num_sources:
         sys.stderr.write(f"WARNING: Overriding infer-config batch-size ({pgie_batch_size}) with number of sources ({num_sources})\n")
@@ -605,6 +577,8 @@ def main():
 
     tiler_rows = int(math.sqrt(num_sources))
     tiler_columns = int(math.ceil(1.0 * num_sources / tiler_rows))
+    tiler_rows = 1
+    tiler_columns = 2
     tiler.set_property("rows", tiler_rows)
     tiler.set_property("columns", tiler_columns)
     
@@ -612,22 +586,22 @@ def main():
     if 'width' in tiler_config: tiler.set_property('width', tiler_config['width'])
     if 'height' in tiler_config: tiler.set_property('height', tiler_config['height'])
 
-    tiler.set_property("width", 960 if num_sources == 1 else 1920)
-
-    if PERF_MODE:
-        if is_aarch64:
-            streammux.set_property("nvbuf-memory-type", 4)
-        else:
-            streammux.set_property("nvbuf-memory-type", 2)
+    # if PERF_MODE:
+    #     if is_aarch64:
+    #         streammux.set_property("nvbuf-memory-type", 4)
+    #     else:
+    #         streammux.set_property("nvbuf-memory-type", 2)
 
     bus = pipeline.get_bus()
     bus.add_signal_watch()
     bus.connect("message", bus_call, loop)
 
-    pipeline_flow = [queue1, pgie, queue2, queue3, sgie1, nvdslogger, tiler, queue4, nvvidconv, queue5, nvosd, queue6, sink]
+    pipeline_flow = [nvvidconv1, queue1, pgie, queue2, queue3, sgie1, nvdslogger, tiler, queue4, nvvidconv2, queue5, nvosd, queue6, sink]
 
     for x in pipeline_flow: pipeline.add(x)
-    streammux.link(pipeline_flow[0])
+
+    multi_src_bin.link(pipeline_flow[0])
+    # streammux.link(pipeline_flow[0])
     for i, ds_element in enumerate(pipeline_flow):
         if i == len(pipeline_flow) - 1: break
         ds_element.link(pipeline_flow[i+1])
@@ -640,18 +614,15 @@ def main():
             return -1
         reid_sgie_pad.add_probe(Gst.PadProbeType.BUFFER, reid_pad_buffer_probe, 0)
 
+        
+
     pipeline.set_state(Gst.State.PLAYING)
 
     _pipeline_ref = pipeline
-    kb_thread = threading.Thread(target=_keyboard_listener, daemon=True, name="kb-listener")
-    kb_thread.start()
-    sys.stdout.write("Running...  [SPACE] to pause/resume\n")
     try:
         loop.run()
     except BaseException:
         pass
-    finally:
-        _kb_stop.set()
 
     sys.stdout.write("Returned, stopping playback\n")
     pipeline.set_state(Gst.State.NULL)

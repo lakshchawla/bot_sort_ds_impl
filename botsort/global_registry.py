@@ -206,6 +206,11 @@ class GlobalRegistry:
                 if entry is not None and feat is not None:
                     entry.add_embedding(feat, frame_id, bbox)
                 continue
+            # else:
+            #     print(track.track_id)
+            
+            if track.is_touching_edge: 
+                continue
 
             if track.tracklet_len < self.min_frames:
                 continue   
